@@ -18,10 +18,14 @@ Methods
                               current student + live teacher (on-policy bound).
 * ``train_rang_kd``        -- Rang et al. composite (1-lam)*CE + lam*KL(P||Q) on
                               frozen student rollouts (comparison paper's method).
-* ``train_offline_opd_support_aware`` -- patch 1: down-weight the OPD update by
-                              a per-state support score (visitation density).
-* ``train_offline_opd_dagger``        -- patch 2: periodically refresh the
-                              dataset with teacher-annotated student rollouts.
+* ``train_offline_opd_active_query``  -- patch 1 (env-spending baseline):
+                              uncertainty-triggered teacher query (SafeDAgger);
+                              queries teacher only at low-confidence states.
+* ``train_offline_opd_full_adv``      -- patch 2 (no-env, minimal fix):
+                              full-distribution advantage; recovers the mode.
+* ``train_offline_opd_branch_replay`` -- patch 3 (no-env, mass recovery):
+                              branch-aware replay; KL-reweights rare records to
+                              close the greedy-vs-sampled gap.
 """
 
 from __future__ import annotations
@@ -224,100 +228,62 @@ def train_rang_kd(ref_policy, teacher, env, rng, *, n_episodes=400, iters=600,
 
 
 # ---------------------------------------------------------------------------
-# 6. Support-aware Lightning OPD (patch 1)
+# 6. Uncertainty-triggered teacher query (patch 1 -- active DAgger / SafeDAgger)
 # ---------------------------------------------------------------------------
 
 
-def train_offline_opd_support_aware(ref_policy, teacher, env, rng, *,
-                                    n_episodes=400, iters=600, lr=0.2,
-                                    kappa=8.0, beta=1.0, beta0=0.3,
-                                    explore_eps=0.0):
-    """Patch 1: support-aware *conservative* offline OPD.
+def train_offline_opd_active_query(ref_policy, teacher, env, rng, *,
+                                   n_episodes=400, iters=600, lr=0.2,
+                                   refresh_every=60, refresh_episodes=60,
+                                   conf_thresh=0.7):
+    """Patch 1 (env-spending baseline): uncertainty-triggered teacher query.
 
-    Two coupled mechanisms, both keyed on a per-state support score
-    ``w(s) = n(s) / (n(s) + kappa)`` (visitation density in the precomputed set):
+    This is active imitation learning (SafeDAgger / active DAgger). The professor's
+    literal hint. It periodically rolls the current student out in the env and
+    appends teacher-annotated fresh states, but queries the teacher ONLY where the
+    student is uncertain:
 
-      1. The OPD advantage update is scaled by ``w(s)`` -- thinly covered states
-         emit weak updates, so the student is not driven by confident-but-
-         unverifiable advantages where the offline approximation is unreliable.
-      2. A conservative anchor pulls the student back toward the SFT reference
-         with strength ``beta * (1 - w(s))``: on thinly covered states the update
-         is dominated by an L2-style pull to pi_ref, which reduces variance and
-         gives a do-no-harm floor at the SFT level.
+        max_a pi_theta(a|s) < conf_thresh.
 
-    NOTE on scope: this anchor is NOT a fix for the missing recovery skill. It
-    pulls the student toward pi_ref, and pi_ref (a clean-demo SFT policy) never
-    learned ``ask_followup`` either -- so on a genuine error branch the anchor
-    can only stabilise the student around the same non-recovering behaviour, not
-    invent the recovery action. What it buys is variance reduction and a
-    conservative floor on well-vs-poorly covered states; it cannot manufacture a
-    signal that the sampled-action advantage never contained. (This is weaker
-    than, and should not be conflated with, the *implicit* regularisation
-    Lightning OPD derives in-distribution; that result is about staying near
-    pi_ref where the teacher signal is dense, not about covering off-support
-    error branches.)
+    Confident states are skipped (no teacher query spent there). The trigger
+    concentrates the live-teacher budget on the error branch -- the off-support
+    states where the student is unsure -- instead of spending it uniformly.
 
-    Together these target the *variance* side of the failure, not the *coverage*
-    side -- contrast patch 3 (full-distribution advantage), which attacks the
-    coverage side directly while keeping the same no-env-access contract.
+    ``conf_thresh`` interpolates endpoints: ``0.0`` never triggers ->
+    plain Lightning OPD; ``1.0`` always triggers -> full DAgger.
+
+    SCOPE: this still spends env access and live-teacher queries. It is NOT a
+    no-env fix -- it is the env-spending baseline that patch 3 (branch-aware
+    replay) is meant to surpass without any env access.
+
+    Diagnostics: ``n_refresh_steps`` (states appended) and
+    ``n_teacher_queries`` (live teacher annotations spent).
     """
     data = collect_dataset(ref_policy, env, rng, n_episodes, teacher=teacher,
-                           explore_eps=explore_eps)
-    policy = ref_policy.copy()
-    counts = Counter(rec["state"].key() for rec in data)
-    support_w = {k: c / (c + kappa) for k, c in counts.items()}
-    # precompute per-record feature matrix + frozen reference log-probs
-    for rec in data:
-        rec["_F"] = _features(rec["state"])
-        rec["_w"] = support_w[rec["state"].key()]
-        rec["_ref_logp"] = ref_policy.logprobs(rec["state"])
-    for _ in range(iters):
-        grad = np.zeros_like(policy.w)
-        for rec in data:
-            F, a, w = rec["_F"], rec["action"], rec["_w"]
-            logits = F @ policy.w
-            z = logits - logits.max()
-            p = np.exp(z); p /= p.sum()
-            lp = np.log(np.clip(p, 1e-12, 1.0))
-            pF = p @ F
-            # (1) density-scaled OPD push on the sampled action
-            adv = float(np.clip(rec["teacher_logp"][a] - lp[a], -ADV_CLIP, ADV_CLIP))
-            grad += w * adv * (F[a] - pF)
-            # (2) conservative anchor toward pi_ref (grad of -KL(pi_theta||pi_ref)),
-            #     vectorized: sum_a coeff[a]*(F[a]-pF) = coeff@F - coeff.sum()*pF
-            anchor = beta0 + beta * (1.0 - w)
-            coeff = p * (rec["_ref_logp"] - lp)
-            grad += anchor * (coeff @ F - coeff.sum() * pF)
-        policy.w += lr * grad / len(data)
-    return policy, {"support_w": support_w}
-
-
-# ---------------------------------------------------------------------------
-# 7. DAgger-refresh Lightning OPD (patch 2)
-# ---------------------------------------------------------------------------
-
-
-def train_offline_opd_dagger(ref_policy, teacher, env, rng, *, n_episodes=400,
-                             iters=600, lr=0.2, refresh_every=60,
-                             refresh_episodes=60, explore_eps=0.0):
-    """Patch 2. Periodically the current student rolls out a small batch in the
-    env; the teacher annotates those fresh student-visited states and they are
-    appended to the dataset. Minimal DAgger-style refresh: adds bounded online
-    interaction so error-branch states the student actually reaches get covered.
-    Trades a little 'no env access' purity for robustness to coverage gaps."""
-    data = collect_dataset(ref_policy, env, rng, n_episodes, teacher=teacher,
-                           explore_eps=explore_eps)
+                           explore_eps=0.0)
     for rec in data:
         rec["_F"] = _features(rec["state"])
     policy = ref_policy.copy()
     n_refresh = 0
+    n_queries = 0
     for it in range(iters):
         if refresh_every and it > 0 and it % refresh_every == 0:
-            fresh = collect_dataset(policy, env, rng, refresh_episodes, teacher=teacher)
-            for rec in fresh:
-                rec["_F"] = _features(rec["state"])
-            data = data + fresh
-            n_refresh += len(fresh)
+            # roll the CURRENT student out in the env (env.step counted)
+            for _ in range(refresh_episodes):
+                steps, _, _ = rollout(policy, env, rng)
+                for st in steps:
+                    state = st["state"]
+                    # uncertainty trigger: query the teacher only where the
+                    # student's top action is below the confidence threshold.
+                    conf = float(policy.probs(state).max())
+                    if conf < conf_thresh:
+                        n_queries += 1
+                        rec = dict(st)
+                        rec["teacher_logp"] = teacher.logprobs(state)
+                        rec["teacher_p"] = teacher.probs(state)
+                        rec["_F"] = _features(state)
+                        data.append(rec)
+                        n_refresh += 1
         grad = np.zeros_like(policy.w)
         for rec in data:
             F, a = rec["_F"], rec["action"]
@@ -328,17 +294,17 @@ def train_offline_opd_dagger(ref_policy, teacher, env, rng, *, n_episodes=400,
             adv = float(np.clip(rec["teacher_logp"][a] - lp_a, -ADV_CLIP, ADV_CLIP))
             grad += adv * (F[a] - p @ F)
         policy.w += lr * grad / len(data)
-    return policy, {"n_refresh_steps": n_refresh}
+    return policy, {"n_refresh_steps": n_refresh, "n_teacher_queries": n_queries}
 
 
 # ---------------------------------------------------------------------------
-# 8. Full-distribution-advantage Lightning OPD (patch 3)
+# 7. Full-distribution-advantage Lightning OPD (patch 2)
 # ---------------------------------------------------------------------------
 
 
 def train_offline_opd_full_adv(ref_policy, teacher, env, rng, *, n_episodes=400,
                                iters=600, lr=0.2, explore_eps=0.0):
-    """Patch 3: full-distribution advantage, the minimal in-contract repair.
+    """Patch 2: full-distribution advantage, the minimal in-contract repair.
 
     Lightning OPD's gradient at a state uses the SINGLE sampled action ``a``:
 
@@ -382,6 +348,75 @@ def train_offline_opd_full_adv(ref_policy, teacher, env, rng, *, n_episodes=400,
             #   grad log pi(a) = F[a] - pF  ->  sum_a tp[a]*adv[a]*(F[a]-pF)
             coeff = tp * adv                                       # (N_ACTIONS,)
             grad += coeff @ F - coeff.sum() * pF
+        policy.w += lr * grad / len(data)
+    return policy, {"support": support, "n_support_states": len(support)}
+
+
+# ---------------------------------------------------------------------------
+# 8. Branch-aware replay (patch 3 -- no-env, KL-reweighted full-dist)
+# ---------------------------------------------------------------------------
+
+
+def train_offline_opd_branch_replay(ref_policy, teacher, env, rng, *,
+                                    n_episodes=400, iters=600, lr=0.2,
+                                    gamma=5.0, explore_eps=0.0):
+    """Patch 3: branch-aware replay.
+
+    Diagnosis: patch 2 (full-distribution advantage) hits greedy 1.000 but
+    only sampled ~0.864.  The reason is frequency dilution: the offline dataset
+    has ~32 rare error-branch / recovery records vs ~600 golden-path records.
+    In the equally-weighted gradient sum the on-path majority drowns out the
+    recovery minority.  The student therefore puts only thin mass on
+    ``ask_followup`` even though it is the argmax -- hence the greedy/sampled
+    gap.  Online OPD reaches sampled ~0.990 on the same linear features because
+    it visits the error states repeatedly and reinforces recovery to dominance.
+
+    Fix: reweight each record by
+
+        alpha(s) = 1 + gamma * KL(pi_T(.|s) || pi_ref(.|s))
+
+    High at error-branch states -- where teacher and pi_ref maximally disagree
+    (KL ~ tens of nats, pi_T puts ~1.0 on recovery, pi_ref puts ~0) -- low on
+    the golden path where they agree (KL ~ 0).  All quantities are already
+    precomputed offline in the frozen dataset (teacher_p, ref logprobs).  Zero
+    extra env interaction, zero extra teacher query.
+
+    The gradient is patch 2's full-distribution advantage, scaled per record:
+
+        alpha(s) * sum_a pi_T(a|s) * clip(log pi_T - log pi_theta) * grad log pi(a|s)
+
+    gamma=0 reproduces patch 2 exactly.  Expected: greedy stays at 1.000,
+    sampled rises from 0.864 toward 0.99.
+    """
+    data = collect_dataset(ref_policy, env, rng, n_episodes, teacher=teacher,
+                           explore_eps=explore_eps)
+    policy = ref_policy.copy()
+    support = state_key_set(data)
+    for rec in data:
+        rec["_F"] = _features(rec["state"])
+        # KL(pi_T || pi_ref) at this state, clamped to [0, inf)
+        tp = rec["teacher_p"]                            # (N_ACTIONS,)
+        ref_lp = ref_policy.logprobs(rec["state"])       # (N_ACTIONS,)
+        tlp = rec["teacher_logp"]                        # (N_ACTIONS,)
+        # KL = sum_a pi_T(a) * (log pi_T(a) - log pi_ref(a)), skip zero-mass actions
+        kl = float(np.sum(tp * np.clip(tlp - ref_lp, -50.0, 50.0) *
+                          (tp > 1e-30)))
+        rec["_alpha"] = 1.0 + gamma * max(kl, 0.0)
+    for _ in range(iters):
+        grad = np.zeros_like(policy.w)
+        for rec in data:
+            F = rec["_F"]
+            tp = rec["teacher_p"]
+            tlp = rec["teacher_logp"]
+            alpha = rec["_alpha"]
+            logits = F @ policy.w
+            z = logits - logits.max()
+            p = np.exp(z); p /= p.sum()
+            lp = np.log(np.clip(p, 1e-12, 1.0))
+            pF = p @ F
+            adv = np.clip(tlp - lp, -ADV_CLIP, ADV_CLIP)   # (N_ACTIONS,)
+            coeff = tp * adv                                  # (N_ACTIONS,)
+            grad += alpha * (coeff @ F - coeff.sum() * pF)
         policy.w += lr * grad / len(data)
     return policy, {"support": support, "n_support_states": len(support)}
 

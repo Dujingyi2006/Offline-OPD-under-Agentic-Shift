@@ -1,0 +1,1031 @@
+% =====================================================================
+%  Offline On-Policy Distillation Breaks Under Multi-Turn Distribution Shift
+%  A controlled, GPU-free study.
+%
+%  OVERLEAF UPLOAD INSTRUCTIONS  (IMPORTANT: read the compiler line)
+%  ----------------------------
+%  Upload this file (report.tex) together with the figures:
+%      architecture.png
+%      fig_main.png  fig_coverage.png  fig_deploy.png  fig_representation.png
+%      fig_pareto.png  fig_sweeps.png
+%  (they live in ../results/ on disk; upload them flat, next to this .tex).
+%
+%  >>> SET THE COMPILER TO XeLaTeX <<<
+%  In Overleaf: Menu (top-left)  ->  Settings  ->  Compiler  ->  XeLaTeX.
+%  The ctex package below needs XeLaTeX for full Chinese support. With it you
+%  may type Chinese ANYWHERE (section titles, body, captions) and edit freely.
+%  Do NOT compile with pdfLaTeX -- Chinese will fail.
+% =====================================================================
+\documentclass[11pt]{article}
+
+% Compiler guard: MUST use XeLaTeX
+\RequirePackage{ifxetex}
+\ifxetex\else
+  \errmessage{%
+    ^^J========================================^^J
+    COMPILER ERROR: You must use XeLaTeX!^^J
+    In Overleaf: Menu -> Settings -> Compiler -> XeLaTeX^^J
+    ========================================^^J}
+\fi
+
+\usepackage{ctex}              % full Chinese support; requires XeLaTeX
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{fontawesome5}      % \faGithub icon for the repo link
+\usepackage[colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue]{hyperref}
+\usepackage{url}
+
+% Compact, paper-style spacing
+\captionsetup{font=small,labelfont=bf}
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0pt}
+
+% Shorthand for inline code
+\newcommand{\code}[1]{\texttt{#1}}
+% Inline CJK -- with ctex (XeLaTeX) Chinese works everywhere, so this is a
+% transparent pass-through. Kept so existing \cn{...} calls still compile.
+\newcommand{\cn}[1]{#1}
+% Section question tag, right-aligned and light
+\newcommand{\qtag}[1]{\hfill{\normalfont\small\color{gray}[Question (#1)]}}
+
+\title{\textbf{Offline On-Policy Distillation Breaks Under\\ Multi-Turn Distribution Shift}\\[0.3em]
+\large A Controlled, GPU-Free Study}
+
+\author{Jingyi Du \,(\cn{杜兢漪})\\[0.2em]
+\normalsize First-year Undergraduate, Joint Institute (\cn{密院大一本科生})\\
+\normalsize Shanghai Jiao Tong University\\
+\normalsize \href{mailto:productivity25@sjtu.edu.cn}{productivity25@sjtu.edu.cn}}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{center}
+\small Code: \faGithub\;\url{https://github.com/Dujingyi2006/Offline-OPD-under-Agentic-Shift}
+\end{center}
+
+% ---------------------------------------------------------------------
+\paragraph{Why I picked this question.}
+I want to join the Industrial Foundation Group as a research intern. Foundation
+model training is the center of gravity in AI right now, and I want to be part
+of it. I have no model training experience yet, and I have never touched a GPU
+cluster, but I am deeply interested in how these systems learn, where they
+break, and how to fix them. I know Professor [Name] runs an 800-A100 cluster,
+one of the largest academic training setups in the field. That is exactly the
+environment I want to learn in. This report is my way of showing I can think
+carefully about training dynamics, isolate failure modes, and propose testable
+fixes, even when I have to build the entire experiment on a CPU because I do
+not yet have access to the real thing. I chose the offline distillation question
+because it sits at the intersection of efficiency (training without environment
+access, the thing that scales) and the multi-turn agentic setting (the thing
+foundation models are increasingly asked to do). If I can show the method breaks
+under controlled conditions and explain why, that is a step toward understanding
+what would break at scale.
+
+\paragraph{Abstract.}
+Lightning OPD offers the on-policy signal of online distillation at the price of
+supervised fine-tuning, by moving the teacher advantage off-policy and removing the
+environment from the training loop. Its theory rests on two assumptions, support
+coverage and teacher consistency, and argues that under consistency any residual
+gap between the online and offline updates is governed by policy drift and is otherwise
+capacity-limited. We test this central claim in the setting the paper itself flags as
+open, a multi-turn agentic task. We build a small fault-diagnosis environment that
+runs on a CPU, with no GPU or large language model, in which an early tool error pushes
+the agent onto a recovery branch the clean demonstrations never visit. A single tabular
+oracle writes the demonstrations and supplies every teacher target, so teacher
+consistency holds by construction, and the recovery action is representable in the
+student, so capacity is not the bottleneck. Across five seeds, Lightning OPD lands
+at or below the supervised floor ($0.632$ vs $0.699$ success) with roughly ten
+times the variance, while online RL and online OPD reach $1.000$. The surviving gap is
+therefore neither a consistency bias nor a capacity limit. We trace it to a third
+cause, coverage of the distilled signal. Off-support, the sampled-action advantage
+is a one-sample estimator drawn from the reference policy, which places near-zero mass
+on the recovery action, so the recovery term is not high-variance but systematically
+absent from the estimator's support. Three ablations confirm the mechanism: plain
+Lightning OPD is flat across collection coverage, tracks supervised fine-tuning under
+deployment shift, and collapses to the supervised floor once parameter generalization
+is removed. We then change one line, replacing the sampled action by the closed-form
+expectation under the full teacher distribution, and the same student reaches
+$1.000$ at the same one-time collection budget, with no environment access and no live
+teacher, matching the full-distribution offline method of Rang et al.\
+(arXiv:2509.26497) cell for cell. Two caveats remain. This $1.000$ is
+argmax-aligned and falls to $\approx 0.87$ under sampled evaluation, which a
+branch-aware replay reweighting then lifts to $0.95$, still at zero environment cost,
+while an uncertainty-triggered teacher query that also closes the gap does so only
+by spending the environment access the method exists to avoid. The operative variable
+is not whether one touches the environment, but what one distills.
+
+\hrulefill
+
+\newpage
+% =====================================================================
+\thispagestyle{empty}
+\begin{center}
+{\Large\textbf{Contents}}\\[0.3em]
+{\small 教授布置的七道题分别在以下章节作答。}
+\end{center}
+\vspace{1.5em}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.6}
+\begin{tabular}{c p{10.5cm} c}
+\toprule
+\textbf{题号} & \textbf{教授要求（原题）} & \textbf{对应章节} \\
+\midrule
+(i)   & 阅读 Lightning OPD 论文以及其 codebase，理解 SFT、online RL、online OPD、offline OPD 的区别。 & \S\ref{sec:methods} \\
+(ii)  & Lightning OPD 在 offline 情况下做了哪些假设？这些假设在所有类型的数据上都成立吗？ & \S\ref{sec:assumptions} \\
+(iii) & 设计一个轻量级的多轮 agentic toy task（无需 GPU 与 LLM）：包含多轮决策、工具式动作、错误分支、最终答案奖励，且早期错误会污染后续状态。 & \S\ref{sec:task} \\
+(iv)  & 实现并对比至少三种方法（SFT / online RL / offline OPD，可选 online OPD 作为上界）：成功率、平均奖励、轨迹长度、off-support 状态比例。 & \S\ref{sec:compare} \\
+(v)   & Lightning OPD 在多轮 agentic 任务中有哪些问题？offline OPD 在什么情况下有效、什么情况下失效（分布偏移、状态覆盖不足、错误轨迹累积）？ & \S\ref{sec:why} \\
+(vi)  & 与 \href{https://arxiv.org/pdf/2509.26497}{arXiv:2509.26497} 中的离线策略相比有哪些区别？ & \S\ref{sec:rang} \\
+(vii) & 针对观察到的某一个局限，提出一个代码/方法层面的改进，并做一个简单的消融实验。 & \S\ref{sec:patch} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\vspace{1.5em}
+
+\begin{center}
+\small This report keeps a paper-style layout. Each section heading also quotes the
+assigned question it answers, so the two readings line up one to one.
+\end{center}
+
+\newpage
+
+% =====================================================================
+\section{阅读 Lightning OPD 论文以及其 codebase，理解 SFT、online RL、online OPD、offline OPD 的区别 \qtag{i}}
+\label{sec:methods}
+% =====================================================================
+
+I read the Lightning OPD paper (\code{t2.pdf}) and its codebase. Four training
+recipes appear. They differ on two axes: does the environment run inside the
+training loop, and does a live teacher run inside it. Lightning OPD's whole pitch
+is to answer ``no'' to both, yet keep an on-policy-style signal.
+
+The advantage signal is the same object in online and offline OPD. For a state
+$s_t$ and action $a_t$,
+\[
+A_t = \log \pi_T(a_t \mid s_t) - \log \pi_\theta(a_t \mid s_t)
+\qquad \text{(stop-grad, clipped).}
+\]
+Online OPD computes it on states the current student visits. Lightning
+OPD computes it once, on rollouts sampled from a frozen reference policy
+$\pi_{\mathrm{ref}}$, and reuses that frozen signal for every gradient step.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{l c c l r}
+\toprule
+\textbf{method} & \textbf{env in loop?} & \textbf{live teacher?} & \textbf{what it optimizes} & \textbf{env steps} \\
+\midrule
+SFT          & no  & no  & cross-entropy on fixed demos                         & 0 \\
+online RL    & yes & no  & policy gradient on env reward                        & $\sim$155k \\
+online OPD   & yes & yes & advantage $A_t$ on freshly visited states            & $\sim$30k \\
+offline OPD  & no  & no  & frozen advantage $A_t$ on $\pi_{\mathrm{ref}}$ rollouts & $\sim$635 \\
+\bottomrule
+\end{tabular}
+\caption{The four recipes. Env steps are the measured training-time cost in this
+study (\S\ref{sec:patch}). Offline OPD's 635 is a one-time collection that
+350 training iterations then reuse with zero further \code{env.step}.}
+\label{tab:methods}
+\end{table}
+
+Read the table top to bottom and the trade is clear. SFT is the cheapest and the
+most fragile: it copies demonstrations and never sees its own mistakes. Online RL
+and online OPD are correct but expensive, because they pay environment steps on
+every gradient step. Lightning OPD is the interesting case. It claims the
+on-policy signal of OPD at the price tag of SFT. The rest of this report tests
+whether that claim survives contact with a multi-turn task.
+% =====================================================================
+\section{Lightning OPD 在 offline 情况下做了哪些假设？这些假设在所有类型的数据上都成立吗？ \qtag{ii}}
+\label{sec:assumptions}
+% =====================================================================
+
+To move the advantage off-policy, Lightning OPD leans on two assumptions. Support
+coverage (Asm 3.2) requires the frozen $\pi_{\mathrm{ref}}$ to visit every state the
+student will later visit; where $\pi_{\mathrm{ref}}$ never went, there is no advantage
+to read. Teacher consistency (Asm 3.4) requires the model that wrote the SFT demos and
+the model that supplies $\log\pi_T$ to be the same, so the mismatch variance is
+$\sigma_\Delta^2 = 0$.
+
+The paper's theory then rests on these. Theorem 3.5 bounds the
+online--offline gap by drift alone,
+\[
+\bigl\|\nabla J_{\mathrm{on}} - \nabla J_{\mathrm{off}}\bigr\|_2
+\;\le\; G\,\sigma_A \sqrt{\chi^2(\pi_\theta \,\|\, \pi_{\mathrm{ref}})},
+\]
+and the gap is exactly zero at initialization $\pi_\theta=\pi_{\mathrm{ref}}$.
+Theorem 3.6 gives a shared fixed point when the teacher is representable.
+Just after it, the paper goes one step further: when the teacher is not
+representable the offline update still ``stays close to the online one as long as
+drift remains small, suggesting comparable capacity-limited behavior in practice.''
+
+Do these hold on all data? No. Single-turn data hides the gap; multi-turn
+data exposes it. On a single-turn task the student acts once, so it cannot drift
+into states $\pi_{\mathrm{ref}}$ never saw. Coverage holds for free and the Thm 3.5
+bound is tight. A multi-turn agent is different. One wrong tool call lands it in a
+state off the reference distribution. There two things fail at once: the
+precomputed advantage is undefined on the action actually sampled, and the
+recovery skill was never on the golden path to be sampled in the first place.
+Off-support the drift $\chi^2(\pi_\theta\|\pi_{\mathrm{ref}})$ blows up, so the
+Thm 3.5 bound becomes empty. The guarantee does not break loudly. It simply stops
+saying anything.
+
+The claim I attack. Beating on Asm 3.2 alone is cheap, since the authors
+themselves flag multi-turn agents as open in Appendix E. So I aim higher, at the
+capacity reading: that under teacher consistency, any surviving gap is a
+representability problem, and adding capacity closes it. I design the experiment
+to let me test that claim on its own terms. Consistency holds by construction,
+because a single tabular oracle teacher writes the SFT demos and supplies every
+$\log\pi_T$ target, so $\sigma_\Delta^2 = 0$ exactly. I sit inside the regime where
+the paper's guarantee is supposed to bite, which kills the easy referee escape,
+``you broke consistency.'' Capacity is not the bottleneck either: the recovery action
+is representable in the student's class, and the same linear student, fed the full
+teacher distribution (patch 2, \S\ref{sec:patch}), reaches 1.000 at zero extra
+env cost. The capacity to recover is present; the sampled-action signal just
+never points at it.
+
+With consistency satisfied and capacity sufficient, the capacity reading predicts
+near-online behavior. \S\ref{sec:compare} proves it wrong: the method lands at
+or below SFT. The surviving gap is therefore neither a consistency bias nor a
+capacity limit. It is a coverage-of-the-distilled-signal failure.
+
+% =====================================================================
+\section{设计一个轻量级的多轮 agentic toy task（无需 GPU 与 LLM）：包含多轮决策、工具式动作、错误分支、最终答案奖励，且早期错误会污染后续状态 \qtag{iii}}
+\label{sec:task}
+% =====================================================================
+
+I designed a fault-diagnosis episode. It is small, runs on a CPU, and meets every
+requirement in the brief: multi-turn decisions, tool-style actions, an error
+branch, a final-answer reward, and early errors that poison later states.
+
+The expert walks a thin golden path. It calls the discriminative tool,
+reads the result, then commits the matching fix. Deployment adds tool noise. A
+discriminative tool can return a false negative and rule out the true
+fault. That pushes the agent onto an error branch. The only escape is
+\code{ask\_followup}, a recovery action that never appears on the clean golden
+path, so it is absent from any frozen-$\pi_{\mathrm{ref}}$ dataset.
+
+The student is a feature-based linear-softmax policy with shared weights.
+This matters. Shared weights mean the student generalizes its on-path
+behaviour into unseen states, the way a real model does. There it fails
+deterministically, rather than escaping by luck. The error compounds: one bad
+tool call early changes every state that follows.
+
+Figure~\ref{fig:arch} lays out the full setup end to end: the offline collection
+that freezes the dataset, the advantage-weighted gradient the student trains on, the
+multi-turn task it is deployed into, and the precise point where the contract breaks.
+The advantage is read at a single action $a\sim\pi_{\mathrm{ref}}$, so the recovery
+action on the error branch is never distilled. That is the coverage-of-the-distilled-signal
+gap this report measures, not an env-access gap.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{architecture.png}
+\caption{Offline On-Policy Distillation under agentic shift: frozen data, no
+environment in the loop, no live teacher. The frozen reference $\pi_{\mathrm{ref}}$
+records one action per state; the advantage $A=\log\pi_T-\log\pi_\theta$ is read at
+that single action. When deploy noise pushes the student onto the error branch, the
+recovery action \code{ask\_followup} ($\pi_{\mathrm{ref}}\approx 10^{-8}$) carries no
+gradient, so the support-coverage assumption fails as an importance-sampling condition
+and success lands at 0.63, below the SFT floor.}
+\label{fig:arch}
+\end{figure}
+
+% =====================================================================
+\section{实现并对比至少三种方法（SFT / online RL / offline OPD，可选 online OPD 作为上界）：成功率、平均奖励、轨迹长度、off-support 状态比例 \qtag{iv}}
+\label{sec:compare}
+% =====================================================================
+
+I implemented all four required methods plus online OPD as an upper bound, and the
+Rang-style offline KD as the full-distribution comparison. Fixed operating point:
+\code{collect\_noise = 0.05}, \code{deploy\_noise = 0.30}. The brief asks for four
+metrics: success rate, average reward, trajectory length, and off-support state
+ratio. Table~\ref{tab:metrics} reports all four, mean $\pm$ std over 5 seeds
+(\code{results\_main.csv}, Figure~\ref{fig:main}).
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{l c c c c}
+\toprule
+\textbf{method} & \textbf{success} & \textbf{avg reward} & \textbf{traj.\ length} & \textbf{off-support ratio} \\
+\midrule
+teacher (oracle)               & $1.000 \pm .000$ & $0.928 \pm .001$ & $3.61 \pm .03$ & $0.078$ \\
+online RL                      & $1.000 \pm .000$ & $0.928 \pm .001$ & $3.61 \pm .04$ & $0.198$ \\
+online OPD (upper bound)       & $1.000 \pm .000$ & $0.928 \pm .001$ & $3.61 \pm .03$ & $0.078$ \\
+\textbf{Rang et al.\ offline KD} & $\mathbf{1.000 \pm .000}$ & $0.928 \pm .001$ & $3.61 \pm .03$ & $0.078$ \\
+\textbf{offline OPD + branch replay (patch 3)} & $\mathbf{1.000 \pm .000}$ & $0.928 \pm .001$ & $3.61 \pm .03$ & $0.078$ \\
+\textbf{offline OPD + full-dist adv (patch 2)} & $\mathbf{1.000 \pm .000}$ & $0.928 \pm .001$ & $3.61 \pm .03$ & $0.078$ \\
+offline OPD + active query (patch 1) & $0.880 \pm .13$ & $0.55 \pm .24$ & $3.80 \pm .21$ & $0.134$ \\
+SFT                            & $0.699 \pm .014$ & $0.319 \pm .028$ & $3.90 \pm .04$ & $0.000$ \\
+\textbf{Lightning OPD}         & $\mathbf{0.632 \pm .269}$ & $0.183 \pm .552$ & $4.01 \pm .69$ & $0.147$ \\
+\bottomrule
+\end{tabular}
+\caption{Four-metric comparison at the fixed operating point. Off-support ratio is
+the fraction of visited states absent from the frozen $\pi_{\mathrm{ref}}$ dataset.}
+\label{tab:metrics}
+\end{table}
+
+Read the four metrics together and the failure has a fingerprint.
+
+On success, Lightning OPD lands at 0.632, below the 0.699 SFT
+floor. It buys nothing over plain imitation here. Its std is 0.269, an order
+of magnitude above SFT's 0.014. That variance is the tell: whether a seed's
+frozen dataset happened to brush the error branch decides the run. Average reward
+tells the same story, sharper. Lightning OPD averages 0.183 against SFT's 0.319;
+the frozen advantage actively drags reward below imitation. Trajectory length adds
+the third symptom: Lightning OPD's episodes are the longest (4.01), so it wanders,
+while the successful methods finish in $\sim$3.6 steps like the teacher. The
+off-support ratio is the diagnostic axis. SFT stays rigidly on-support (0.000),
+failing by stalling rather than by wandering. Lightning OPD is the highest among the
+no-env methods (0.147): it leaves the covered region and fails there. The winners sit
+at the teacher's 0.078, because they recover and rejoin near-golden trajectories.
+Online RL's 0.198 is benign, since it trained on those states, so visiting them is fine.
+
+Three methods reach 1.000 from the same frozen, no-env-access budget:
+Rang's full-distribution KD, and, decisively, Lightning OPD's own gradient
+with one line changed (patch 2, \S\ref{sec:patch}). The variable is what you
+distill, not whether you touch the environment.
+
+% =====================================================================
+\section{Lightning OPD 在多轮 agentic 任务中有哪些问题？offline OPD 在什么情况下有效、什么情况下失效（分布偏移、状态覆盖不足、错误轨迹累积）？ \qtag{v}}
+\label{sec:why}
+% =====================================================================
+
+\subsection{The mechanism, from the case studies}
+
+\code{case\_studies.txt} shows a forced error-branch episode (true fault
+\code{db}, a discriminative tool gives a wrong reading at step 1). After the false
+negative, Lightning OPD cycles uselessly through \code{inspect\_log} $\to$
+\code{check\_config} $\to$ \code{query\_db} (twice) and times out at $-1.12$. The
+teacher hits the same false negative, plays \code{ask\_followup} at the all-against
+state, recovers the belief, and commits \code{final\_db} for $+0.98$, so the recovery
+skill exists and OPD just never saw it. Active query (patch 1) queries the teacher at
+the uncertain state, gets the recovery distribution, and climbs to 0.88, but at the
+cost of 159 live annotations and mid-training env rollouts.
+
+This is a coverage failure, not an optimization failure. The advantage
+$\log\pi_T - \log\pi_\theta$ is defined only where the frozen rollouts went. The
+error branch is off-support by construction. Lightning OPD has no term that pulls
+the student toward the teacher there.
+
+\subsection{Ablation A --- collection coverage}
+\code{results\_coverage.csv}, Figure~\ref{fig:coverage} (and panel (a) of
+Figure~\ref{fig:sweeps} with 95\% CIs).
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{c c c c c c}
+\toprule
+\textbf{collect\_noise} & \textbf{offline OPD} & \textbf{active query} & \textbf{full-dist adv} & \textbf{branch replay} & \textbf{Rang KD} \\
+\midrule
+0.00 & 0.673 & 0.693 & 0.699 & 0.699 & 0.699 \\
+0.05 & 0.694 & 0.831 & 1.000 & 1.000 & 1.000 \\
+0.15 & 0.601 & 0.853 & 1.000 & 1.000 & 1.000 \\
+0.30 & 0.732 & 0.876 & 1.000 & 1.000 & 1.000 \\
+\bottomrule
+\end{tabular}
+\caption{Success vs collection coverage, deploy fixed at 0.30. Active query benefits
+from broader coverage (more states to query), while full-dist and branch replay hit
+1.000 as soon as error states appear in data.}
+\label{tab:coverage}
+\end{table}
+
+Plain Lightning OPD is flat across coverage ($\sim$0.6--0.73). Broadening
+the dataset does not help, because the advantage gradient still ignores actions the
+reference never sampled. Active query climbs with coverage (more states to query at),
+but at the cost of env access. Both full-distribution methods sit at the SFT floor at
+zero coverage, then jump to 1.000 the moment any noise surfaces the error states.
+They only need the recovery states to appear, not to be acted out. Patch 2
+tracks Rang cell for cell, and patch 3 matches them. That is the cleanest evidence
+that what you distill is the operative variable.
+
+\subsection{Ablation B --- deployment shift}
+\code{results\_deploy.csv}, Figure~\ref{fig:deploy} (and panel (b) of
+Figure~\ref{fig:sweeps} with 95\% CIs).
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{c c c c c c c}
+\toprule
+\textbf{deploy\_noise} & \textbf{offline OPD} & \textbf{full-dist adv} & \textbf{branch replay} & \textbf{Rang KD} & \textbf{online OPD} & \textbf{SFT} \\
+\midrule
+0.10 & 0.804 & 1.000 & 1.000 & 1.000 & 1.000 & 0.900 \\
+0.20 & 0.751 & 1.000 & 1.000 & 1.000 & 1.000 & 0.795 \\
+0.30 & 0.694 & 1.000 & 1.000 & 1.000 & 1.000 & 0.699 \\
+0.45 & 0.608 & 1.000 & 1.000 & 1.000 & 1.000 & 0.554 \\
+\bottomrule
+\end{tabular}
+\caption{Success vs deployment shift, collection fixed at 0.05. The three
+full-distribution methods stay flat at 1.000 across all shift levels.}
+\label{tab:deploy}
+\end{table}
+
+Lightning OPD drops steadily as the error branch fires more often, and it
+tracks SFT closely. It inherits imitation's weakness under shift. The
+full-distribution methods stay flat at 1.000. Shift only bites if the recovery
+skill was never distilled.
+
+\subsection{Ablation C --- generalization vs pure coverage}
+\code{results\_representation.csv}, Figure~\ref{fig:repr}.
+
+There are two ways an offline method can cover an error branch it never acted out.
+Parameter generalization lets a shared-weight student interpolate on-path
+behaviour into unseen states. Literal support means a per-state table only
+knows states present in its data. To separate them I re-ran the offline methods
+with a tabular per-state student, whose gradient at state $s$ touches only
+$s$'s own logits. Off-support states get zero gradient and stay frozen at their SFT
+value, by construction.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{l c c c c}
+\toprule
+ & \textbf{collect 0.00} & \textbf{0.05} & \textbf{0.15} & \textbf{0.30} \\
+\midrule
+\textbf{linear} SFT          & 0.699 & 0.699 & 0.699 & 0.699 \\
+\textbf{linear} Lightning OPD& 0.673 & 0.694 & 0.601 & 0.732 \\
+\textbf{linear} Rang KD      & 0.699 & \textbf{1.000} & \textbf{1.000} & \textbf{1.000} \\
+\textbf{tabular} SFT         & 0.697 & 0.697 & 0.697 & 0.697 \\
+\textbf{tabular} Lightning OPD & 0.697 & 0.725 & 0.719 & 0.758 \\
+\textbf{tabular} Rang KD     & 0.697 & 0.780 & 0.903 & 0.919 \\
+online OPD (both)            & 1.000 & 1.000 & 1.000 & 1.000 \\
+\bottomrule
+\end{tabular}
+\caption{Success at deploy 0.30 across the coverage sweep, linear vs tabular student.}
+\label{tab:repr}
+\end{table}
+
+The tabular column makes two things clear.
+
+First, at zero coverage every offline method collapses to exactly the SFT
+floor (0.697). With no shared weights there is no gradient at the off-support
+error states. Neither the advantage signal nor the full teacher distribution can
+move the student there. The entire distillation gain over imitation, off-support,
+is a generalization effect. Pull generalization out and Lightning OPD provably adds
+nothing over SFT. Assumption 3.2 does not just degrade off-support, it leaves
+the method with no signal at all. This disproves the ``capacity is the cure'' claim
+(\S\ref{sec:assumptions}) directly. The tabular student is the highest-capacity
+student in the study: one independent logit vector per state, zero approximation
+error, the teacher exactly representable. The capacity reading predicts the easy
+regime, yet at zero coverage it is the worst regime. Adding capacity this way makes
+the result collapse to SFT, not approach online. Capacity without coverage of the
+distilled signal buys exactly nothing.
+
+Second, Rang's headline win was carried by generalization. In the linear
+student, full-distribution KD jumps to 1.000 once recovery states appear, because
+shared weights propagate that mass into the many error states the student reaches.
+Strip generalization away and the same method, same data, tops out at $\sim$0.92.
+Coverage does the work; generalization is the amplifier.
+
+Online OPD stays at 1.000 in both representations, because it visits the
+error states itself. That pins the blame: the tabular collapse is a coverage
+failure, not a capacity or optimization one.
+
+\begin{quote}\small
+Note on framing. The off-support success rate does not crash to zero. The
+on-path golden behaviour still solves the no-error episodes ($\sim$0.70). What
+crashes to zero is the distillation gain over SFT off-support, the
+quantity Assumption 3.2 is actually about.
+\end{quote}
+
+\subsection{When offline OPD works, and when it fails}
+
+The experiments give a clean rule. Offline OPD works when the frozen
+dataset already covers the states the student will visit, as in single-turn tasks, or
+multi-turn tasks where deployment shift is small and the demos are diverse.
+It fails when three things stack up: distribution shift moves the student
+off the reference distribution, state coverage is incomplete there, and early
+errors compound into states no demo ever reached. A multi-turn agentic task hits
+all three at once. That is exactly where Lightning OPD lands below SFT.
+
+% =====================================================================
+\section{与 https://arxiv.org/pdf/2509.26497 中的离线策略相比有哪些区别？ \qtag{vi}}
+\label{sec:rang}
+% =====================================================================
+
+The comparison paper is Rang et al., openPangu Embedded-1B
+(\href{https://arxiv.org/pdf/2509.26497}{arXiv:2509.26497}). Both methods are
+offline and distill a teacher. The difference is what they distill.
+
+The two share the structure of the offline setting: no environment in the training
+loop, a frozen teacher signal, and a student trained by gradient descent on a fixed
+dataset. They differ in the target. Lightning OPD distills the sampled action's
+advantage, $A_t = \log\pi_T(a_t) - \log\pi_\theta(a_t)$, on one action per state.
+Rang distills the teacher's full next-token distribution, with a cross-entropy plus
+KL loss, $\mathcal{L} = (1-\lambda)\,\mathrm{CE} + \lambda\,\mathrm{KL}(P\|Q)$,
+$\lambda=0.7$. The full distribution carries the recovery action's probability mass
+wherever the teacher puts it. The sampled-action advantage does not, because the
+golden-path rollouts never sample \code{ask\_followup}.
+
+This single difference is the whole story of Table~\ref{tab:metrics}. Rang reaches
+1.000 from the same no-env budget. Lightning OPD does not.
+
+\subsection{Is Rang's 100\% too good to be true? Stress-testing the headline}
+\label{sec:rang-stress}
+
+A zero-variance 1.000 should make a referee suspicious. So I tried to break it.
+
+It is not 1.000 unconditionally. At \code{collect\_noise = 0}
+(Table~\ref{tab:coverage}, and the linear Rang 0.00 cell of
+Table~\ref{tab:repr}) Rang sits at 0.699, the SFT floor. A clean dataset never
+surfaces the recovery states, so full-distribution KD has nothing to transfer. The
+win depends on collection touching the error branch at least occasionally.
+
+Strip generalization and the 1.000 disappears. The tabular column of
+Table~\ref{tab:repr} is built for this. Same loss, same data, per-state student:
+Rang tops out at 0.78 / 0.90 / 0.92 and never reaches 1.000. The headline was
+generalization spending coverage efficiently, not the loss being complete.
+
+I also measured where the recovery mass lives. On
+golden-path states the teacher puts $\approx 10^{-8}$ on \code{ask\_followup},
+effectively zero, not a small constant tail. The recovery mass (mean $\approx
+0.6$, up to 1.0) sits entirely on the error-branch states. Those enter a frozen
+dataset only when collection noise triggers them (0 such states at
+\code{collect\_noise=0}; 32 / 56 / 99 records at 0.05 / 0.15 / 0.30). So Rang
+wins because, once an error state appears, the full-distribution target there is
+$\approx 1.0$ on recovery, while the sampled-action advantage at that same state
+is whatever non-recovery action the rollout took.
+
+So the 100\% is real but fragile and fully explained. It is the joint product of a
+full-distribution target carrying recovery mass and parameter generalization
+broadcasting it off-support. Remove the target and you get Lightning OPD (0.63).
+Remove generalization and you get tabular Rang ($\le$0.92). Remove coverage and you
+get the 0.699 floor. I report it as a ceiling conditional on its two enabling
+mechanisms, not as an unqualified ``Rang wins.''
+
+% =====================================================================
+\section{针对观察到的某一个局限，提出一个代码/方法层面的改进，并做一个简单的消融实验 \qtag{vii}}
+\label{sec:patch}
+% =====================================================================
+
+Lightning OPD evaluates only one sampled action per state, and the
+offline dataset records that action. But the reference policy
+($\pi_{\text{ref}}$) collected this data on a clean, optimal path. Once the agent
+makes a mistake and drifts off-support, the recorded action is never the correct
+recovery action. The reference policy does not know how to escape traps; its
+probability of choosing the recovery action is near zero ($10^{-8}$). As a result,
+the advantage formula cancels out the missing action entirely, and the final policy
+gradient carries zero recovery signal. The student learns what not to do, but it
+never learns how to save itself.
+
+I propose three patches and ablate them. One breaks the method's premise; patches 2
+and 3 are honest in-contract fixes. Patch 1, an uncertainty-triggered teacher query,
+is SafeDAgger-style active imitation that queries the teacher only when
+$\max_a \pi_\theta(a\mid s) < \tau$; it breaks the contract by spending the very
+resource Lightning OPD exists to avoid, reaching greedy $0.880 \pm .13$ at $\tau=0.7$
+with 1558 env-steps and 159 queries, and is analyzed in \S\ref{sec:patch1-contract}.
+Patch 2, the full-distribution advantage, is the minimal in-contract fix: greedy 1.000,
+sampled 0.867, 642 env-steps, zero queries, analyzed in \S\ref{sec:patch2}. Patch 3,
+branch-aware replay, closes the remaining mass gap at zero env cost by reweighting
+each record by $\alpha(s) = 1 + \gamma\cdot\mathrm{KL}(\pi_T \| \pi_{\mathrm{ref}})$,
+upweighting error-branch states where teacher and reference maximally disagree; it
+reaches greedy 1.000, sampled 0.902 ($\gamma=5$), up to 0.950 at $\gamma=100$, with
+630 env-steps and zero queries, analyzed in \S\ref{sec:patch3}.
+
+\subsection{Patch 1: strong but breaks the contract}
+\label{sec:patch1-contract}
+
+The professor's literal hint was to query the teacher only at uncertain states, a
+SafeDAgger-style active imitation scheme. The intuition is sound: on the golden path
+the student is confident, and only at error-branch states does it need help. I
+implemented this as an uncertainty-triggered query: at each training step, if
+$\max_a \pi_\theta(a\mid s) < \tau$ (confidence threshold), query the teacher for the
+full distribution at that state and inject it into the dataset.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{c c c c c}
+\toprule
+\textbf{conf thresh $\tau$} & \textbf{greedy} & \textbf{sampled} & \textbf{env-steps} & \textbf{queries} \\
+\midrule
+0.0  & $0.695 \pm .14$ & $0.711$ & 1594 & 0 \\
+0.5  & $0.739 \pm .14$ & $0.744$ & 1586 & 36 \\
+0.7  & $0.880 \pm .13$ & $0.826$ & 1558 & 159 \\
+0.9  & $0.898 \pm .10$ & $0.853$ & 1560 & 191 \\
+1.0  & $0.895 \pm .11$ & $0.847$ & 1581 & 931 \\
+\bottomrule
+\end{tabular}
+\caption{Patch 1 ablation: confidence threshold $\tau$. Higher $\tau$ queries more
+states, lifting greedy success but spending env-steps. Plotted with 95\% CIs in
+panel (d) of Figure~\ref{fig:sweeps}.}
+\label{tab:active-ablation}
+\end{table}
+
+The method works. At $\tau=0.7$, greedy climbs to $0.880$, a 0.25 lift over plain
+Lightning OPD. But it has the same fatal flaw as the old DAgger patch:
+
+\begin{quote}\small
+Lightning OPD exists to remove the environment and the live teacher from
+the training loop. That is the cost it sells the pots and pans to save. The moment
+patch 1 calls \code{env.step} on student rollouts mid-training to reach the uncertain
+states, it has spent exactly that resource back. And the 159 teacher queries are live
+annotations on fresh states, another resource Lightning OPD freezes at collection.
+\end{quote}
+
+So patch 1 is not ``offline OPD, fixed.'' It is online learning in offline OPD's
+clothes. Once you are paying for live env access and teacher queries, the honest
+baseline is online OPD (1.000 greedy, 0.990 sampled), and patch 1's 0.880 is
+strictly dominated within its own cost class. The professor's hint is a valid method
+for online distillation with query budgeting. It is not a fix for Lightning
+OPD's offline contract.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{l c c c l}
+\toprule
+ & \textbf{env access?} & \textbf{live teacher?} & \textbf{greedy} & \textbf{honest verdict} \\
+\midrule
+Lightning OPD            & no  & no  & 0.63 & fails (the baseline) \\
+active query (patch 1)   & \textbf{yes} & \textbf{yes} & 0.88 & \textbf{online learning in offline's clothes} \\
+full-dist adv (patch 2)  & no  & no  & \textbf{1.00} & honest fix (full distribution) \\
+branch replay (patch 3)  & no  & no  & \textbf{1.00} & honest fix (reweighted gradient) \\
+Rang offline KD          & no  & no  & \textbf{1.00} & honest fix (full distribution) \\
+online OPD               & yes & yes & 1.00 & the right tool once env is on the table \\
+online RL                & yes & no  & 1.00 & the right tool once env is on the table \\
+\bottomrule
+\end{tabular}
+\caption{The honest frontier. No row is both no-env-access and beats the
+full-distribution offline methods. Patch 1 sits strictly inside the frontier.}
+\label{tab:frontier}
+\end{table}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{l c r l c}
+\toprule
+\textbf{method} & \textbf{env access} & \textbf{env-steps} & \textbf{spent\ldots} & \textbf{greedy} \\
+\midrule
+teacher / SFT             & none & \textbf{0}     & ---                            & 1.000 / 0.699 \\
+\textbf{Lightning OPD}    & none & \textbf{633}   & once, at collection            & 0.632 \\
+\textbf{branch replay (patch 3)} & none & \textbf{630} & once, at collection       & \textbf{1.000} \\
+\textbf{full-dist adv (patch 2)} & none & \textbf{635} & once, at collection       & \textbf{1.000} \\
+Rang offline KD           & none & 642            & once, at collection            & \textbf{1.000} \\
+active query (patch 1)    & \textbf{yes} & \textbf{1\,558} & once + \textbf{mid-training rollouts} & 0.880 \\
+online OPD                & yes  & \textbf{30\,303}  & \textbf{every gradient step} & 1.000 \\
+online RL                 & yes  & \textbf{154\,526} & \textbf{every gradient step} & 1.000 \\
+\bottomrule
+\end{tabular}
+\caption{Measured environment budget. The timing column is the honest axis.
+The three no-env patches share Lightning OPD's $\approx$630 budget; patch 1 pays
+2.5$\times$ more for weaker results.}
+\label{tab:budget}
+\end{table}
+
+Two things these tables make clear. First, the four no-env methods share one budget:
+Lightning OPD, patches 2 and 3, and Rang all pay $\approx$ 630--642 env-steps, a
+one-time collection that training reuses with zero further \code{env.step}. On that
+identical budget the score ranges from 0.632 to 1.000, so the comparison is
+apples-to-apples, and what separates the methods is the loss, not the budget. Second,
+patch 1 and the online methods are a different cost class. Patch 1's 1\,558 steps are
+recurring mid-training rollouts plus teacher queries, and online OPD/RL spend
+env-steps on every gradient step, 48$\times$ / 244$\times$ the offline budget. Once a
+method is in this column, the honest baseline is online OPD/RL (both 1.000), and patch
+1's 0.880 is strictly dominated within its own cost class.
+
+Figure~\ref{fig:pareto} draws this frontier on its true axis. Plotting greedy success
+against total interaction budget makes the apples-to-apples comparison visible at a
+glance: the four no-env methods cluster at $\approx$630 steps, the in-contract patches
+and Rang ride the same 1.000 ceiling as online OPD/RL at $\sim$50$\times$ less
+interaction, and patch~1 sits strictly inside the frontier.
+
+\subsection{Patch 2: the minimal in-contract fix (full-distribution advantage)}
+\label{sec:patch2}
+
+Rang's 1.000 leaves an objection: maybe it wins because it is a different method
+(CE+KL), not because of the full-distribution target specifically. Patch 2 is the
+control that isolates the variable. It keeps Lightning OPD's gradient
+exactly, with the same frozen dataset, no env access, no live teacher, the same
+advantage-PG form, and the same clip, and changes one thing. Instead of the sampled
+action's advantage $A(a)\cdot\nabla\log\pi(a)$, it takes the expectation under the
+teacher's full distribution:
+\[
+\sum_a \pi_T(a\mid s)\,\cdot\,\mathrm{clip}\bigl(\log\pi_T(a\mid s) - \log\pi_\theta(a\mid s)\bigr)\,\cdot\,\nabla\log\pi_\theta(a\mid s).
+\]
+That is the single edit. The result is $1.000 \pm .000$, tying Rang and tracking it
+cell for cell across the coverage sweep. It runs at the same $\sim$635 env-step
+budget as plain Lightning OPD, with zero additional interaction.
+
+\paragraph{Why this is not a variance argument.}
+It is tempting to read patch 2 as ``the same gradient, lower variance.'' That is
+wrong, and the distinction is the crux of the diagnosis. Write the per-state
+advantage-PG contribution. Lightning OPD evaluates it at the single rollout action
+$a \sim b(\cdot\mid s)$, where $b$ is the behaviour policy that generated the
+dataset (here $\pi_{\mathrm{ref}}$):\[
+g_{\mathrm{LOPD}}(s) = A(a,s)\,\nabla\log\pi_\theta(a\mid s),
+\qquad a \sim b(\cdot\mid s).
+\]
+Patch 2 replaces the sampled action by the expectation under the teacher:
+\[
+g_{\mathrm{FULL}}(s) = \sum_a \pi_T(a\mid s)\,A(a,s)\,\nabla\log\pi_\theta(a\mid s)
+= \mathbb{E}_{a \sim \pi_T(\cdot\mid s)}\!\bigl[A(a,s)\,\nabla\log\pi_\theta(a\mid s)\bigr].
+\]
+The catch is the sampling distribution. A Monte-Carlo estimate of $g_{\mathrm{FULL}}$
+needs $a \sim \pi_T$, but Lightning OPD's one sample is drawn from
+$b = \pi_{\mathrm{ref}}$. So $g_{\mathrm{LOPD}}$ is an unbiased one-sample estimator
+of a different quantity,
+\[
+\mathbb{E}_{a \sim \pi_{\mathrm{ref}}}\!\bigl[A(a,s)\,\nabla\log\pi_\theta(a\mid s)\bigr]
+\;\neq\;
+\mathbb{E}_{a \sim \pi_T}\!\bigl[A(a,s)\,\nabla\log\pi_\theta(a\mid s)\bigr]
+= g_{\mathrm{FULL}}(s),
+\]
+and the two coincide only when $\pi_{\mathrm{ref}} \approx \pi_T$ on
+$\mathrm{supp}(\pi_T(\cdot\mid s))$. That is exactly the support-coverage
+assumption, re-derived as an importance-sampling condition. Off-support it fails
+maximally. At an error-branch state the recovery action $r=\code{ask\_followup}$ has
+$\pi_T(r\mid s)\approx 1.0$ but $\pi_{\mathrm{ref}}(r\mid s)\approx 0$ (measured
+$\approx 10^{-8}$). The term that dominates $g_{\mathrm{FULL}}$,
+\[
+\pi_T(r\mid s)\,A(r,s)\,\nabla\log\pi_\theta(r\mid s)
+\quad\text{with}\quad \pi_T(r\mid s)\approx 1.0,\ A(r,s)\gg 0,
+\]
+is sampled by $g_{\mathrm{LOPD}}$ with probability $\pi_{\mathrm{ref}}(r\mid s)
+\approx 0$. No amount of averaging over more rollouts recovers it, because
+every rollout is drawn from the same $\pi_{\mathrm{ref}}$ that puts zero mass on
+$r$. The missing term is not high-variance. It is systematically absent from the
+estimator's support. Increasing the dataset is the wrong axis, since it shrinks
+variance on terms $\pi_{\mathrm{ref}}$ already samples and does nothing for the term
+it never can. This is the formal content of ``flat across coverage'' in
+Table~\ref{tab:coverage}.
+
+Two clarifications keep this honest. First, $g_{\mathrm{FULL}}$ is not
+the gradient of $\mathrm{KL}(\pi_T\|\pi_\theta)$, since that gradient is
+$\sum_a \pi_T(a)\nabla\log\pi_\theta(a)$, with no advantage weight.
+$g_{\mathrm{FULL}}$ is the advantage-weighted policy gradient with the teacher as
+sampling measure. It keeps Lightning OPD's stop-grad advantage word for word and changes
+only the measure, from $\pi_{\mathrm{ref}}$ (one sample) to $\pi_T$ (closed form).
+What the two share is the fixed point: at $\pi_\theta = \pi_T$ every $A(a,s)=0$, so
+both vanish. Second, patch 2 is therefore not a variance-reduced estimator of
+$g_{\mathrm{LOPD}}$'s target. It computes a different target exactly, using
+the one piece of information Lightning OPD already precomputed but only ever read at
+the sampled index, the full row $\pi_T(\cdot\mid s)$. It costs no env access
+because the recovery mass lives in $\pi_T$ (precomputed offline), not in
+$\pi_{\mathrm{ref}}$ (which did the sampling).
+
+This pins the diagnosis with no room left to argue. It is not the no-env-access
+contract that breaks Lightning OPD, since patch 2 keeps it and hits ceiling. It is not
+that Rang's CE+KL loss is magic, since a one-line change to Lightning OPD's own gradient
+reproduces the win. It is the sampled-action restriction: formally, estimating
+$g_{\mathrm{FULL}}$ by a single draw from $\pi_{\mathrm{ref}}$ instead of
+evaluating the $\pi_T$-expectation in closed form.
+
+Patch 2 is the honest fix the paper should have shipped. It stays inside the exact
+contract Lightning OPD sells, and still closes the gap, because the gap was never
+about the contract. It was about distilling one action instead of the whole
+distribution.
+
+\subsection{Patch 3: closing the mass gap at zero env cost (branch-aware replay)}
+\label{sec:patch3}
+
+Patch 2 hits greedy 1.000 but drops to 0.867 under sampling, a $-0.13$ gap. The
+recovery action is the mode at error states, but $\sim$13\% of the mass still
+sits on wrong actions. Online OPD closes this gap (sampled 0.990) by visiting
+the error states and reinforcing recovery to dominance. Patch 3 asks: can we close
+the mass gap without env access?
+
+The idea is branch-aware replay. The frozen dataset already contains
+error-branch records, which appeared when collection noise drifted the reference
+off the golden path. But they are rare (off-support ratio $\approx 0.08$), so their
+gradient contribution is diluted. Patch 3 reweights each record by
+\[
+\alpha(s) = 1 + \gamma\cdot\mathrm{KL}\bigl(\pi_T(\cdot\mid s) \| \pi_{\mathrm{ref}}(\cdot\mid s)\bigr).
+\]
+At error-branch states, the teacher strongly prefers \code{ask\_followup}
+($\pi_T \approx 1.0$) while the reference never learned it
+($\pi_{\mathrm{ref}} \approx 10^{-8}$). The KL is large, so $\alpha(s)$ upweights
+these rare but critical records. On the golden path, $\pi_T \approx \pi_{\mathrm{ref}}$,
+so $\alpha(s) \approx 1$ and records pass through unchanged.
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{c c c c c}
+\toprule
+\textbf{$\gamma$} & \textbf{greedy} & \textbf{sampled} & \textbf{env-steps} & \textbf{queries} \\
+\midrule
+0.0   & 1.000 & 0.870 & 626 & 0 \\
+1.0   & 1.000 & 0.882 & 627 & 0 \\
+5.0   & 1.000 & 0.902 & 630 & 0 \\
+20.0  & 1.000 & 0.932 & 627 & 0 \\
+100.0 & 1.000 & 0.950 & 627 & 0 \\
+\bottomrule
+\end{tabular}
+\caption{Patch 3 ablation: KL weight $\gamma$. Higher $\gamma$ lifts sampled success
+with zero env cost, closing $\sim$80\% of the greedy--sampled gap at $\gamma=100$.
+Plotted with 95\% CIs in panel (c) of Figure~\ref{fig:sweeps}.}
+\label{tab:branch-ablation}
+\end{table}
+
+The ablation tells the story. At $\gamma=0$ (uniform weighting) we recover patch 2's
+0.870 sampled baseline. As $\gamma$ grows, sampled success climbs monotonically:
+0.882 at $\gamma=1$, 0.902 at $\gamma=5$, 0.932 at $\gamma=20$, reaching 0.950 at
+$\gamma=100$. That closes $\sim$80\% of the 0.13 gap between greedy 1.000 and online
+OPD's sampled 0.990, all at the same $\approx$630 env-step budget, with zero additional
+interaction and zero teacher queries.
+
+\paragraph{Why this works without env access.}
+The error-branch records already exist in the frozen dataset; collection noise
+surfaced them. The problem is not absence but dilution: they contribute
+$\approx$8\% of the gradient budget while the golden-path records dominate at 92\%.
+Patch 3 does not create new data. It reweights existing data so the rare error-branch
+records pull their weight. The KL between $\pi_T$ and $\pi_{\mathrm{ref}}$ is computed
+from the frozen teacher distribution and the frozen reference policy, both
+precomputed at collection, with no live annotation needed.
+
+\paragraph{What remains.}
+Even at $\gamma=100$, sampled 0.950 trails online OPD's 0.990 by 0.04. That residual is
+the true cost of never visiting the error states. Online methods reinforce
+recovery mass to $\approx$1.0 by receiving reward signals at the states. Offline
+methods only distill what the teacher would do, never seeing the outcome.
+Patch 3 squeezes the most out of frozen data, but the last 0.04 is exactly what
+env access buys.
+
+\subsection{What the 1.000 hides: greedy vs sampled evaluation}
+\label{sec:greedy}
+
+The headline metric takes greedy (argmax) actions. That is standard, but it
+makes offline distillation look better than it is. A careful referee should ask what distribution the
+student actually learned, not just its mode. So I re-evaluated every method by
+sampling from the policy (\code{sampled\_success\_rate}).
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{l c c c c}
+\toprule
+\textbf{method} & \textbf{greedy} & \textbf{sampled} & \textbf{$\Delta$ (sampled $-$ greedy)} & \textbf{env access} \\
+\midrule
+teacher       & 1.000 & 1.000 & $0.00$  & --- \\
+online RL     & 1.000 & 0.997 & $-0.00$ & yes \\
+online OPD    & 1.000 & 0.990 & $-0.01$ & yes \\
+\textbf{branch replay (patch 3)} & \textbf{1.000} & \textbf{0.902} & $\mathbf{-0.10}$ & no \\
+\textbf{Rang offline KD} & \textbf{1.000} & \textbf{0.869} & $\mathbf{-0.13}$ & no \\
+\textbf{full-dist adv (patch 2)} & \textbf{1.000} & \textbf{0.867} & $\mathbf{-0.13}$ & no \\
+active query (patch 1) & 0.880 & 0.826 & $-0.05$ & yes \\
+SFT           & 0.699 & 0.749 & $+0.05$ & no \\
+Lightning OPD & 0.632 & 0.665 & $+0.03$ & no \\
+\bottomrule
+\end{tabular}
+\caption{Greedy vs sampled success. Patch 3 closes $\sim$80\% of the greedy--sampled
+gap that patch 2 leaves, reaching 0.902 sampled at zero env cost.}
+\label{tab:greedy}
+\end{table}
+
+Two honest admissions, both of which sharpen the thesis.
+
+My own 1.000s are greedy-conditional. The three no-env offline methods
+that hit greedy 1.000 all drop under sampling: patch 2 to 0.867 ($-0.13$), Rang to
+0.869 ($-0.13$), and, crucially, patch 3 to 0.902 ($-0.10$). So even the best
+offline fix does not learn a confidently recovering policy. It learns one where
+\code{ask\_followup} is merely the most likely action at the error states, with
+$\sim$10--13\% of the mass still on wrong actions. Patch 3's branch-aware reweighting
+closes $\sim$80\% of this gap at $\gamma=100$ (sampled 0.950), but the residual 0.04
+is exactly what env access buys.
+
+The greedy--sampled gap is itself a coverage thermometer. The two
+online methods barely move ($-0.00/-0.01$): having visited and been rewarded at
+the error states, they drive recovery mass to $\approx 1.0$, so sampling and
+argmax agree. The offline methods lose 0.10--0.13 precisely because off-support they
+only ever saw the recovery action once it appeared in data, never reinforced it to
+dominance. Patch 3 narrows the drop to 0.10 by reweighting error-branch records,
+but without env access it cannot reach online's 0.01. The size of the drop separates
+having visited the states (online, $\sim$0) from having only distilled the states
+(patch 2, $\sim$0.13) from distilling with branch-aware replay (patch 3, $\sim$0.10).
+
+So even my best fix carries the fingerprint of the disease. The honest framing is not
+``patches 2 and 3 solve it'' but ``patch 2 recovers the mode off-support at zero env
+cost, patch 3 closes 80\% of the remaining mass gap still at zero env cost, and the
+last 0.04 is exactly what costs env access (online OPD/RL, sampled $\approx 0.99$).''
+
+% =====================================================================
+\section{Takeaway}
+\label{sec:takeaway}
+% =====================================================================
+
+I do not attack Lightning OPD's admitted open problem (multi-turn coverage). I
+attack its central, load-bearing claim: that under teacher consistency the
+online--offline gap is governed by drift (Thm 3.5), and any residual is
+capacity-limited. I satisfy that claim's premises exactly. Consistency holds by
+construction ($\sigma_\Delta^2 = 0$). Capacity is sufficient (the same linear
+student reaches 1.000 once fed the full distribution). And the method still lands at
+or below SFT (0.632 vs 0.699), with an order of magnitude more variance. The
+surviving gap is therefore neither a consistency bias nor a capacity limit. It is a
+coverage-of-the-distilled-signal failure. Three messages, in order of force.
+
+First, the failure is not where the paper's theory locates it. With
+consistency satisfied and capacity sufficient, the method still fails, because
+off-support it has no signal, and only literal support or live env access can
+supply one. The ``capacity is the cure'' claim is proven wrong by the
+tabular column, where maximal capacity at zero coverage is the worst case.
+
+Second, given generalization, what you distill decides whether
+coverage is enough. Patch 2 isolates the variable: hold the dataset, the no-env
+contract, and the advantage-PG form fixed, swap only the sampled action for the
+full distribution, and the score goes $0.63 \to 1.000$, one line, in-contract.
+Under sampling that 1.000 is $\approx 0.87$, so patch 2 recovers the mode, not the
+full mass. Patch 3 closes 80\% of that gap at $\gamma=100$, still in-contract.
+
+Third, the results that look like they cut against the thesis don't. Active query's
+0.88 is online learning in disguise: it spends the env access and teacher queries
+Lightning OPD exists to avoid, and is dominated by the online methods it has become.
+Rang's 1.000 is not unconditional: it falls to the SFT floor at zero coverage and
+to $\le$0.92 once generalization is removed. Every surprise reduces to the same
+mechanism as the main failure.
+
+% =====================================================================
+\section*{Reproduce}
+% =====================================================================
+
+\begin{verbatim}
+cd opd_toy
+python run_experiments.py     # writes ../results/*.csv + case_studies.txt
+python plots.py               # writes ../results/fig_*.png
+python plots_paper.py         # writes ../results/fig_{pareto,sweeps}.{pdf,png}
+\end{verbatim}
+
+Artifacts: \code{results\_main.csv}, \code{results\_coverage.csv},
+\code{results\_deploy.csv}, \code{results\_representation.csv},
+\code{results\_active.csv}, \code{results\_patch3.csv}, \code{case\_studies.txt}, and
+\code{fig\_\{main,coverage,deploy,representation,pareto,sweeps\}.png}.
+
+% =====================================================================
+% Figures
+% =====================================================================
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{fig_main.png}
+\caption{Headline success rate at the fixed operating point (5 seeds). Lightning
+OPD lands below SFT with the largest variance in the table.}
+\label{fig:main}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{fig_coverage.png}
+\caption{Ablation A. Plain Lightning OPD is flat across collection coverage; the
+full-distribution methods jump to 1.000 once error states appear.}
+\label{fig:coverage}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{fig_deploy.png}
+\caption{Ablation B. Lightning OPD drops steadily under deployment shift,
+tracking SFT; the full-distribution methods stay flat at 1.000.}
+\label{fig:deploy}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.85\textwidth]{fig_representation.png}
+\caption{Ablation C. Linear vs tabular student. At zero coverage every offline
+method collapses to the SFT floor.}
+\label{fig:repr}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.92\textwidth]{fig_pareto.png}
+\caption{The honest frontier, drawn on its true axis. Greedy success rate vs.\
+total interaction budget (env-steps $+$ teacher queries, symlog $x$), 5 seeds with
+95\% Student-$t$ confidence intervals. The two in-contract patches (full-distribution
+advantage, branch-aware replay) and Rang reach the same 1.000 ceiling as online
+OPD/RL at $\sim$50$\times$ less interaction, sitting on the dashed Pareto frontier.
+Active query (patch~1, hollow marker) breaks the no-env/no-teacher contract and is
+dominated within its own cost class. Plain Lightning OPD carries the widest interval,
+reflecting its severe seed variance.}
+\label{fig:pareto}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.95\textwidth]{fig_sweeps.png}
+\caption{Consolidated ablations, 5 seeds with 95\% Student-$t$ confidence bands.
+(a) Collection coverage: plain Lightning OPD stays flat and noisy while the
+full-distribution methods jump to 1.000 once error states appear.
+(b) Deployment shift: Lightning OPD tracks the SFT floor downward; full-distribution
+adv.\ stays flat near the online ceiling.
+(c) Branch-replay KL weight $\gamma$ (symlog $x$): greedy is saturated, so sampled
+success is plotted; it climbs monotonically at zero env cost.
+(d) Active-query confidence threshold $\tau$: success rate (left axis) rises with the
+teacher-query count (right axis), exposing the accuracy-for-interaction trade.}
+\label{fig:sweeps}
+\end{figure}
+
+\end{document}

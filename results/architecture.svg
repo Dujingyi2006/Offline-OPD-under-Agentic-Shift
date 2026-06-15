@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1480 900" font-family="'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#9aa3ad"/>
+    </marker>
+    <marker id="arG" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#7fae90"/>
+    </marker>
+    <marker id="arR" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#cf9a9a"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1480" height="900" fill="#ffffff"/>
+
+  <!-- ===== Title ===== -->
+  <text x="740" y="44" text-anchor="middle" font-size="29" font-weight="600" fill="#2b2f36">Offline On-Policy Distillation under Agentic Shift</text>
+  <text x="740" y="71" text-anchor="middle" font-size="15" fill="#7b828c">frozen data &#183; no environment in the loop &#183; no live teacher</text>
+
+  <!-- ============================================================= -->
+  <!-- TOP PIPELINE BAND                                             -->
+  <!-- ============================================================= -->
+
+  <!-- Box 1: Offline Collection -->
+  <rect x="40" y="108" width="240" height="148" rx="14" fill="#e8f0fb" stroke="#aac4e8" stroke-width="1.6"/>
+  <text x="160" y="138" text-anchor="middle" font-size="17" font-weight="600" fill="#2f4b73">Offline Collection</text>
+  <g stroke="#5b7fb0" stroke-width="2" stroke-linecap="round">
+    <line x1="70" y1="130" x2="70" y2="146"/>
+    <line x1="62" y1="138" x2="78" y2="138"/>
+    <line x1="64" y1="132" x2="76" y2="144"/>
+    <line x1="76" y1="132" x2="64" y2="144"/>
+  </g>
+  <text x="160" y="172" text-anchor="middle" font-size="14" fill="#3d5778">frozen reference <tspan font-style="italic">&#960;</tspan><tspan dy="4" font-size="11">ref</tspan></text>
+  <text x="160" y="198" text-anchor="middle" font-size="14" fill="#3d5778">rollouts collected once</text>
+  <text x="160" y="224" text-anchor="middle" font-size="14" fill="#3d5778">teacher rows precomputed</text>
+
+  <line x1="280" y1="182" x2="316" y2="182" stroke="#9aa3ad" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- Box 2: Frozen Dataset -->
+  <rect x="320" y="108" width="240" height="148" rx="14" fill="#e8f0fb" stroke="#aac4e8" stroke-width="1.6"/>
+  <text x="440" y="138" text-anchor="middle" font-size="17" font-weight="600" fill="#2f4b73">Frozen Dataset</text>
+  <rect x="346" y="154" width="188" height="84" rx="8" fill="#ffffff" stroke="#c2d4ec" stroke-width="1.2"/>
+  <text x="440" y="178" text-anchor="middle" font-size="13.5" fill="#3d5778">state <tspan font-style="italic">s</tspan></text>
+  <text x="440" y="200" text-anchor="middle" font-size="13.5" fill="#3d5778">action <tspan font-style="italic">a</tspan> ~ <tspan font-style="italic">&#960;</tspan><tspan dy="4" font-size="11">ref</tspan></text>
+  <text x="440" y="224" text-anchor="middle" font-size="13.5" fill="#3d5778">teacher row <tspan font-style="italic">&#960;</tspan><tspan dy="4" font-size="11">T</tspan><tspan dy="-4">(&#183;|s)</tspan></text>
+
+  <line x1="560" y1="182" x2="596" y2="182" stroke="#9aa3ad" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- Box 3: Gradient core -->
+  <rect x="600" y="108" width="262" height="148" rx="14" fill="#efeafb" stroke="#c3b4e6" stroke-width="1.6"/>
+  <text x="731" y="138" text-anchor="middle" font-size="17" font-weight="600" fill="#523f7a">Frozen Advantage</text>
+  <rect x="624" y="154" width="214" height="46" rx="8" fill="#ffffff" stroke="#d3c6ee" stroke-width="1.2"/>
+  <text x="731" y="183" text-anchor="middle" font-size="14.5" fill="#4a3a70"><tspan font-style="italic">A</tspan> = log <tspan font-style="italic">&#960;</tspan><tspan dy="4" font-size="10">T</tspan><tspan dy="-4"> &#8722; log </tspan><tspan font-style="italic">&#960;</tspan><tspan dy="4" font-size="10">&#952;</tspan></text>
+  <text x="731" y="222" text-anchor="middle" font-size="13" fill="#6b5e8a">stop-grad &#183; clipped</text>
+  <text x="731" y="242" text-anchor="middle" font-size="13" fill="#6b5e8a">advantage-weighted PG</text>
+
+  <line x1="862" y1="182" x2="898" y2="182" stroke="#9aa3ad" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- Box 4: Student -->
+  <rect x="902" y="108" width="160" height="148" rx="14" fill="#efeafb" stroke="#c3b4e6" stroke-width="1.6"/>
+  <text x="982" y="140" text-anchor="middle" font-size="17" font-weight="600" fill="#523f7a">Student</text>
+  <text x="982" y="190" text-anchor="middle" font-size="30" font-style="italic" fill="#4a3a70">&#960;<tspan dy="8" font-size="16">&#952;</tspan></text>
+  <text x="982" y="228" text-anchor="middle" font-size="13" fill="#6b5e8a">linear-softmax</text>
+
+  <line x1="1062" y1="182" x2="1098" y2="182" stroke="#9aa3ad" stroke-width="2" marker-end="url(#ar)"/>
+
+  <!-- Box 5: Deployment task -->
+  <rect x="1102" y="108" width="338" height="148" rx="14" fill="#fbf3e3" stroke="#e8d3a3" stroke-width="1.6"/>
+  <text x="1271" y="136" text-anchor="middle" font-size="16" font-weight="600" fill="#7a5e2a">Multi-turn Agentic Task</text>
+  <!-- golden path -->
+  <circle cx="1134" cy="178" r="9" fill="#cfe6d6" stroke="#7fae90" stroke-width="1.5"/>
+  <circle cx="1196" cy="178" r="9" fill="#cfe6d6" stroke="#7fae90" stroke-width="1.5"/>
+  <circle cx="1258" cy="178" r="9" fill="#cfe6d6" stroke="#7fae90" stroke-width="1.5"/>
+  <line x1="1143" y1="178" x2="1187" y2="178" stroke="#7fae90" stroke-width="2" marker-end="url(#arG)"/>
+  <line x1="1205" y1="178" x2="1249" y2="178" stroke="#7fae90" stroke-width="2" marker-end="url(#arG)"/>
+  <text x="1330" y="182" font-size="13.5" fill="#3f7a55" font-weight="600">&#10003; reward</text>
+  <text x="1134" y="160" text-anchor="middle" font-size="11" fill="#5e8a6c">golden path</text>
+  <!-- error branch -->
+  <circle cx="1196" cy="226" r="9" fill="#f3d9d9" stroke="#cf9a9a" stroke-width="1.5"/>
+  <circle cx="1258" cy="226" r="9" fill="#f3d9d9" stroke="#cf9a9a" stroke-width="1.5"/>
+  <line x1="1196" y1="187" x2="1196" y2="217" stroke="#cf9a9a" stroke-width="2" marker-end="url(#arR)"/>
+  <line x1="1205" y1="226" x2="1249" y2="226" stroke="#cf9a9a" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arR)"/>
+  <text x="1196" y="248" text-anchor="middle" font-size="11" fill="#b06b6b">tool false negative</text>
+  <text x="1330" y="230" font-size="13.5" fill="#b06b6b">&#10007; off-support</text>
+
+  <!-- deployment shift annotation -->
+  <text x="1271" y="93" text-anchor="middle" font-size="12.5" fill="#a98a4a" font-style="italic">deploy noise &#8594; distribution shift</text>
+  <path d="M982 256 C 982 282, 1271 282, 1271 264" fill="none" stroke="#cdb98a" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+  <text x="1126" y="298" text-anchor="middle" font-size="12" fill="#a98a4a">student visits states &#960;<tspan dy="3" font-size="9">ref</tspan><tspan dy="-3"> never saw</tspan></text>
+
+  <!-- ============================================================= -->
+  <!-- CORE DIAGNOSIS BOX                                            -->
+  <!-- ============================================================= -->
+  <rect x="40" y="328" width="1400" height="118" rx="14" fill="#fbeeee" stroke="#e6bcbc" stroke-width="1.6"/>
+  <text x="64" y="358" font-size="17" font-weight="600" fill="#9c4f4f">Failure Diagnosis: a coverage-of-the-distilled-signal gap, not an env-access gap</text>
+  <text x="64" y="388" font-size="14.5" fill="#7a4a4a">The advantage is read at a single action <tspan font-style="italic">a</tspan> ~ <tspan font-style="italic">&#960;</tspan><tspan dy="3" font-size="11">ref</tspan><tspan dy="-3">, so the recovery action on the error branch is never distilled.</tspan></text>
+  <rect x="500" y="402" width="900" height="32" rx="7" fill="#ffffff" stroke="#e6bcbc" stroke-width="1.2"/>
+  <text x="950" y="424" text-anchor="middle" font-size="14.5" fill="#9c4f4f">E<tspan dy="3" font-size="10">a~&#960;ref</tspan><tspan dy="-3"> [ A &#183; &#8711;log&#960;</tspan><tspan dy="3" font-size="10">&#952;</tspan><tspan dy="-3"> ]  &#8800;  E</tspan><tspan dy="3" font-size="10">a~&#960;T</tspan><tspan dy="-3"> [ A &#183; &#8711;log&#960;</tspan><tspan dy="3" font-size="10">&#952;</tspan><tspan dy="-3"> ]   &#8592;  the support-coverage assumption, as an IS condition</tspan></text>
+  <text x="64" y="424" font-size="13.5" fill="#7a4a4a" font-style="italic">result: success 0.63, below the SFT floor</text>
+
+  <!-- arrow from diagnosis down to patches -->
+  <line x1="740" y1="446" x2="740" y2="486" stroke="#9aa3ad" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="760" y="472" font-size="13" fill="#7b828c" font-style="italic">three remedies</text>
+
+  <!-- ============================================================= -->
+  <!-- THREE PATCHES                                                 -->
+  <!-- ============================================================= -->
+  <text x="740" y="510" text-anchor="middle" font-size="18" font-weight="600" fill="#2b2f36">Remedies</text>
+
+  <!-- Patch 1 -->
+  <rect x="60" y="528" width="420" height="312" rx="14" fill="#f3f1ee" stroke="#cfc6ba" stroke-width="1.6"/>
+  <text x="84" y="560" font-size="16" font-weight="600" fill="#7a6a4a">Patch 1 &#183; Active Query (SafeDAgger)</text>
+  <text x="84" y="586" font-size="13.5" fill="#6b5e4a">query teacher when max <tspan font-style="italic">&#960;</tspan><tspan dy="3" font-size="10">&#952;</tspan><tspan dy="-3">(a|s) &lt; &#964;</tspan></text>
+  <rect x="84" y="602" width="372" height="120" rx="8" fill="#ffffff" stroke="#ddd4c8" stroke-width="1.2"/>
+  <circle cx="130" cy="640" r="11" fill="#efeafb" stroke="#c3b4e6" stroke-width="1.5"/>
+  <text x="130" y="645" text-anchor="middle" font-size="12" font-style="italic" fill="#4a3a70">&#960;&#952;</text>
+  <text x="130" y="668" text-anchor="middle" font-size="11" fill="#8a7e6a">uncertain</text>
+  <line x1="151" y1="640" x2="201" y2="640" stroke="#9aa3ad" stroke-width="1.8" marker-end="url(#ar)"/>
+  <rect x="206" y="622" width="92" height="36" rx="7" fill="#fbf3e3" stroke="#e8d3a3" stroke-width="1.3"/>
+  <text x="252" y="645" text-anchor="middle" font-size="12.5" fill="#7a5e2a">env.step</text>
+  <line x1="298" y1="640" x2="338" y2="640" stroke="#9aa3ad" stroke-width="1.8" marker-end="url(#ar)"/>
+  <rect x="342" y="622" width="100" height="36" rx="7" fill="#e8f0fb" stroke="#aac4e8" stroke-width="1.3"/>
+  <text x="392" y="645" text-anchor="middle" font-size="12.5" fill="#2f4b73">live teacher</text>
+  <text x="270" y="700" text-anchor="middle" font-size="12" fill="#b06b6b" font-style="italic">spends env + teacher: breaks the contract</text>
+  <line x1="84" y1="748" x2="456" y2="748" stroke="#e2dacd" stroke-width="1"/>
+  <text x="84" y="772" font-size="14" fill="#6b5e4a">greedy success</text>
+  <text x="456" y="772" text-anchor="end" font-size="15" font-weight="600" fill="#7a6a4a">0.88</text>
+  <text x="84" y="796" font-size="14" fill="#6b5e4a">env-steps</text>
+  <text x="456" y="796" text-anchor="end" font-size="15" font-weight="600" fill="#b06b6b">1558</text>
+  <text x="84" y="820" font-size="14" fill="#6b5e4a">teacher queries</text>
+  <text x="456" y="820" text-anchor="end" font-size="15" font-weight="600" fill="#b06b6b">159</text>
+
+  <!-- Patch 2 -->
+  <rect x="530" y="528" width="420" height="312" rx="14" fill="#eef4ef" stroke="#bcd6c4" stroke-width="1.6"/>
+  <text x="554" y="560" font-size="16" font-weight="600" fill="#3f7a55">Patch 2 &#183; Full-distribution Advantage</text>
+  <text x="554" y="586" font-size="13.5" fill="#4a7a5e">distill the whole teacher row, not one action</text>
+  <rect x="554" y="602" width="372" height="120" rx="8" fill="#ffffff" stroke="#c8dccd" stroke-width="1.2"/>
+  <text x="740" y="650" text-anchor="middle" font-size="15" fill="#3f7a55">&#931;<tspan font-style="italic"> &#960;</tspan><tspan dy="3" font-size="10">T</tspan><tspan dy="-3">(a|s) &#183; clip(A) &#183; &#8711;log&#960;</tspan><tspan dy="3" font-size="10">&#952;</tspan></text>
+  <text x="740" y="688" text-anchor="middle" font-size="12.5" fill="#5e8a6c">measure: &#960;<tspan dy="3" font-size="9">ref</tspan><tspan dy="-3"> (one sample) &#8594; &#960;</tspan><tspan dy="3" font-size="9">T</tspan><tspan dy="-3"> (closed form)</tspan></text>
+  <text x="740" y="710" text-anchor="middle" font-size="12" fill="#3f7a55" font-style="italic">same contract: no env, no live teacher</text>
+  <line x1="554" y1="748" x2="926" y2="748" stroke="#cfe0d4" stroke-width="1"/>
+  <text x="554" y="772" font-size="14" fill="#4a7a5e">greedy success</text>
+  <text x="926" y="772" text-anchor="end" font-size="15" font-weight="600" fill="#3f7a55">1.00</text>
+  <text x="554" y="796" font-size="14" fill="#4a7a5e">env-steps</text>
+  <text x="926" y="796" text-anchor="end" font-size="15" font-weight="600" fill="#3f7a55">642</text>
+  <text x="554" y="820" font-size="14" fill="#4a7a5e">teacher queries</text>
+  <text x="926" y="820" text-anchor="end" font-size="15" font-weight="600" fill="#3f7a55">0</text>
+
+  <!-- Patch 3 -->
+  <rect x="1000" y="528" width="420" height="312" rx="14" fill="#eef4ef" stroke="#bcd6c4" stroke-width="1.6"/>
+  <text x="1024" y="560" font-size="16" font-weight="600" fill="#3f7a55">Patch 3 &#183; Branch-aware Replay</text>
+  <text x="1024" y="586" font-size="13.5" fill="#4a7a5e">reweight rare error-branch records</text>
+  <rect x="1024" y="602" width="372" height="120" rx="8" fill="#ffffff" stroke="#c8dccd" stroke-width="1.2"/>
+  <text x="1210" y="648" text-anchor="middle" font-size="15" fill="#3f7a55">&#945;(s) = 1 + &#947; &#183; KL( &#960;<tspan dy="3" font-size="10">T</tspan><tspan dy="-3"> &#8741; &#960;</tspan><tspan dy="3" font-size="10">ref</tspan><tspan dy="-3"> )</tspan></text>
+  <!-- weight bars -->
+  <rect x="1070" y="676" width="60" height="14" rx="3" fill="#cfe6d6" stroke="#7fae90" stroke-width="1"/>
+  <text x="1100" y="706" text-anchor="middle" font-size="11" fill="#5e8a6c">golden &#945;&#8776;1</text>
+  <rect x="1290" y="668" width="60" height="22" rx="3" fill="#f3d9d9" stroke="#cf9a9a" stroke-width="1"/>
+  <text x="1320" y="706" text-anchor="middle" font-size="11" fill="#b06b6b">error &#945;&#8811;1</text>
+  <text x="1210" y="690" text-anchor="middle" font-size="11" fill="#8a9e8e">vs</text>
+  <line x1="1024" y1="748" x2="1396" y2="748" stroke="#cfe0d4" stroke-width="1"/>
+  <text x="1024" y="772" font-size="14" fill="#4a7a5e">greedy success</text>
+  <text x="1396" y="772" text-anchor="end" font-size="15" font-weight="600" fill="#3f7a55">1.00</text>
+  <text x="1024" y="796" font-size="14" fill="#4a7a5e">sampled success</text>
+  <text x="1396" y="796" text-anchor="end" font-size="15" font-weight="600" fill="#3f7a55">0.95</text>
+  <text x="1024" y="820" font-size="14" fill="#4a7a5e">env-steps / queries</text>
+  <text x="1396" y="820" text-anchor="end" font-size="15" font-weight="600" fill="#3f7a55">630 / 0</text>
+
+  <!-- in-contract band under patch 2 & 3 -->
+  <rect x="530" y="852" width="890" height="2" fill="none"/>
+  <text x="975" y="868" text-anchor="middle" font-size="13" fill="#3f7a55" font-style="italic">in-contract fixes: ceiling success at offline OPD's original budget</text>
+</svg>

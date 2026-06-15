@@ -27,9 +27,9 @@ from evaluate import capture_case_studies, evaluate
 from methods import (
     collect_dataset,
     train_offline_opd,
-    train_offline_opd_dagger,
+    train_offline_opd_active_query,
+    train_offline_opd_branch_replay,
     train_offline_opd_full_adv,
-    train_offline_opd_support_aware,
     train_offline_opd_tabular,
     train_online_opd,
     train_online_opd_tabular,
@@ -93,7 +93,7 @@ def _train_reference_tabular(teacher, seed):
 
 
 def _row(method, seed, collect_noise, deploy_noise, metrics, representation="linear",
-         sampled_success=None, env_steps=None):
+         sampled_success=None, env_steps=None, teacher_queries=None):
     return {
         "method": method,
         "seed": seed,
@@ -106,6 +106,7 @@ def _row(method, seed, collect_noise, deploy_noise, metrics, representation="lin
         "off_support_state_ratio": metrics["off_support_state_ratio"],
         "sampled_success_rate": sampled_success,
         "train_env_steps": env_steps,
+        "teacher_queries": teacher_queries,
     }
 
 
@@ -131,12 +132,13 @@ def run_main():
                                    explore_eps=MAIN_COLLECT_NOISE)
         ref_support = {rec["state"].key() for rec in ref_data}
 
-        def add(name, pol, *, support=ref_support, env_steps=0):
+        def add(name, pol, *, support=ref_support, env_steps=0, teacher_queries=None):
             """Eval greedy + sampled against the shared support; record both."""
             g = _eval(pol, MAIN_DEPLOY_NOISE, seed, support)
             s = _eval(pol, MAIN_DEPLOY_NOISE, seed, mode="sample")
             rows.append(_row(name, seed, MAIN_COLLECT_NOISE, MAIN_DEPLOY_NOISE, g,
-                             sampled_success=s["success_rate"], env_steps=env_steps))
+                             sampled_success=s["success_rate"], env_steps=env_steps,
+                             teacher_queries=teacher_queries))
 
         # teacher (skyline) + sft (floor) -- no training env access
         add("teacher", teacher, env_steps=0)
@@ -154,25 +156,26 @@ def run_main():
                                n_episodes=OPD_EPISODES, iters=OPD_ITERS)
         add("rang_kd", pol, env_steps=coll.n_env_steps - e0)
 
-        # patch 1: support-aware (no env access)
+        # patch 1: uncertainty-triggered teacher query (env-spending baseline)
         e0 = coll.n_env_steps
-        pol, _ = train_offline_opd_support_aware(ref, teacher, coll, rng,
-                                                 n_episodes=OPD_EPISODES,
-                                                 iters=OPD_ITERS)
-        add("offline_opd_support_aware", pol, env_steps=coll.n_env_steps - e0)
+        pol, diag1 = train_offline_opd_active_query(ref, teacher, coll, rng,
+                                                    n_episodes=OPD_EPISODES,
+                                                    iters=OPD_ITERS)
+        add("offline_opd_active_query", pol, env_steps=coll.n_env_steps - e0,
+            teacher_queries=diag1.get("n_teacher_queries"))
 
-        # patch 3: full-distribution advantage (no env access) -- the in-contract
-        # repair that isolates sampled-action vs full-distribution target.
+        # patch 2: full-distribution advantage (no env access) -- in-contract fix
         e0 = coll.n_env_steps
         pol, _ = train_offline_opd_full_adv(ref, teacher, coll, rng,
                                             n_episodes=OPD_EPISODES, iters=OPD_ITERS)
         add("offline_opd_full_adv", pol, env_steps=coll.n_env_steps - e0)
 
-        # patch 2: DAgger refresh -- USES env access mid-training (count it)
+        # patch 3: branch-aware replay (no env access) -- KL-reweighted full-dist
         e0 = coll.n_env_steps
-        pol, diag = train_offline_opd_dagger(ref, teacher, coll, rng,
-                                             n_episodes=OPD_EPISODES, iters=OPD_ITERS)
-        add("offline_opd_dagger", pol, env_steps=coll.n_env_steps - e0)
+        pol, _ = train_offline_opd_branch_replay(ref, teacher, coll, rng,
+                                                 n_episodes=OPD_EPISODES,
+                                                 iters=OPD_ITERS)
+        add("offline_opd_branch_replay", pol, env_steps=coll.n_env_steps - e0)
 
         # online upper bounds -- full env access
         e0 = depl.n_env_steps
@@ -208,20 +211,16 @@ def run_coverage():
                                    n_episodes=OPD_EPISODES, iters=OPD_ITERS)
             rows.append(_row("rang_kd", seed, cn, MAIN_DEPLOY_NOISE,
                              _eval(pol, MAIN_DEPLOY_NOISE, seed)))
-            pol, _ = train_offline_opd_support_aware(ref, teacher, coll, rng,
-                                                     n_episodes=OPD_EPISODES,
-                                                     iters=OPD_ITERS)
-            rows.append(_row("offline_opd_support_aware", seed, cn,
-                             MAIN_DEPLOY_NOISE, _eval(pol, MAIN_DEPLOY_NOISE, seed)))
             pol, _ = train_offline_opd_full_adv(ref, teacher, coll, rng,
                                                 n_episodes=OPD_EPISODES,
                                                 iters=OPD_ITERS)
             rows.append(_row("offline_opd_full_adv", seed, cn,
                              MAIN_DEPLOY_NOISE, _eval(pol, MAIN_DEPLOY_NOISE, seed)))
-            pol, _ = train_offline_opd_dagger(ref, teacher, coll, rng,
-                                              n_episodes=OPD_EPISODES, iters=OPD_ITERS)
-            rows.append(_row("offline_opd_dagger", seed, cn, MAIN_DEPLOY_NOISE,
-                             _eval(pol, MAIN_DEPLOY_NOISE, seed)))
+            pol, _ = train_offline_opd_branch_replay(ref, teacher, coll, rng,
+                                                     n_episodes=OPD_EPISODES,
+                                                     iters=OPD_ITERS)
+            rows.append(_row("offline_opd_branch_replay", seed, cn,
+                             MAIN_DEPLOY_NOISE, _eval(pol, MAIN_DEPLOY_NOISE, seed)))
         print(f"[coverage] seed {seed} done")
     return pd.DataFrame(rows)
 
@@ -242,9 +241,9 @@ def run_deploy():
         # deployment noise levels -- the precomputed signal cannot adapt.
         pol_opd, diag = train_offline_opd(ref, teacher, coll, rng,
                                           n_episodes=OPD_EPISODES, iters=OPD_ITERS)
-        pol_sa, _ = train_offline_opd_support_aware(ref, teacher, coll, rng,
-                                                    n_episodes=OPD_EPISODES,
-                                                    iters=OPD_ITERS)
+        pol_full, _ = train_offline_opd_full_adv(ref, teacher, coll, rng,
+                                                  n_episodes=OPD_EPISODES,
+                                                  iters=OPD_ITERS)
         pol_rang, _ = train_rang_kd(ref, teacher, coll, rng,
                                     n_episodes=OPD_EPISODES, iters=OPD_ITERS)
         for dn in DEPLOY_GRID:
@@ -254,8 +253,8 @@ def run_deploy():
                              _eval(pol_opd, dn, seed, diag["support"])))
             rows.append(_row("rang_kd", seed, MAIN_COLLECT_NOISE, dn,
                              _eval(pol_rang, dn, seed)))
-            rows.append(_row("offline_opd_support_aware", seed,
-                             MAIN_COLLECT_NOISE, dn, _eval(pol_sa, dn, seed)))
+            rows.append(_row("offline_opd_full_adv", seed,
+                             MAIN_COLLECT_NOISE, dn, _eval(pol_full, dn, seed)))
             # online methods get to retrain at each deployment noise level
             depl = AgenticTroubleshootMDP(tool_noise=dn, rng=rng)
             pol, _ = train_online_opd(ref, teacher, depl, rng, iters=ONLINE_OPD_ITERS)
@@ -342,18 +341,97 @@ def run_case_studies():
 
     pol_opd, _ = train_offline_opd(ref, teacher, coll, rng,
                                    n_episodes=OPD_EPISODES, iters=OPD_ITERS)
-    pol_dag, _ = train_offline_opd_dagger(ref, teacher, coll, rng,
-                                          n_episodes=OPD_EPISODES, iters=OPD_ITERS)
+    pol_aq, _ = train_offline_opd_active_query(ref, teacher, coll, rng,
+                                               n_episodes=OPD_EPISODES, iters=OPD_ITERS)
+    pol_br, _ = train_offline_opd_branch_replay(ref, teacher, coll, rng,
+                                                n_episodes=OPD_EPISODES, iters=OPD_ITERS)
     blocks = []
     # force a deployment episode that enters the error branch (noisy env)
     forced = np.random.default_rng(7)
     for name, pol in [("SFT", ref), ("offline_opd (zero-coverage)", pol_opd),
-                      ("offline_opd_dagger", pol_dag), ("teacher", teacher)]:
+                      ("offline_opd_active_query (patch 1)", pol_aq),
+                      ("offline_opd_branch_replay (patch 3)", pol_br),
+                      ("teacher", teacher)]:
         env = AgenticTroubleshootMDP(tool_noise=0.30, rng=forced)
         blocks.append(f"===== {name} =====")
         blocks.extend(capture_case_studies(pol, env, forced, n=3))
         blocks.append("")
     return "\n".join(blocks)
+
+
+# ---------------------------------------------------------------------------
+# Patch 1 ablation: uncertainty-trigger threshold (env-spending baseline)
+# ---------------------------------------------------------------------------
+
+
+def run_active_query():
+    """Sweep the confidence threshold of patch 1 (uncertainty-triggered teacher
+    query). conf_thresh=0.0 -> plain Lightning OPD (no trigger); 1.0 -> full
+    DAgger (every state). The interesting middle: DAgger-class success at a
+    fraction of the live-teacher queries. Records greedy + sampled success,
+    env-steps, and teacher_queries so the report can plot success vs query cost."""
+    rows = []
+    grid = [0.0, 0.5, 0.7, 0.9, 1.0]
+    for seed in range(N_SEEDS):
+        teacher = Teacher(temperature=TEACHER_TEMP)
+        ref = _train_reference(teacher, seed)
+        ref_data = collect_dataset(ref, AgenticTroubleshootMDP(
+            tool_noise=MAIN_COLLECT_NOISE, rng=np.random.default_rng(seed)),
+            np.random.default_rng(seed), OPD_EPISODES, explore_eps=MAIN_COLLECT_NOISE)
+        support = {rec["state"].key() for rec in ref_data}
+        for ct in grid:
+            rng = np.random.default_rng(seed)
+            coll = AgenticTroubleshootMDP(tool_noise=MAIN_COLLECT_NOISE, rng=rng)
+            e0 = coll.n_env_steps
+            pol, diag = train_offline_opd_active_query(
+                ref, teacher, coll, rng, n_episodes=OPD_EPISODES,
+                iters=OPD_ITERS, conf_thresh=ct)
+            env_steps = coll.n_env_steps - e0
+            g = _eval(pol, MAIN_DEPLOY_NOISE, seed, support)
+            s = _eval(pol, MAIN_DEPLOY_NOISE, seed, mode="sample")
+            rows.append(_row(f"active_query_ct{ct}", seed, MAIN_COLLECT_NOISE,
+                             MAIN_DEPLOY_NOISE, g, sampled_success=s["success_rate"],
+                             env_steps=env_steps,
+                             teacher_queries=diag.get("n_teacher_queries")))
+        print(f"[active_query] seed {seed} done")
+    return pd.DataFrame(rows)
+
+
+# ---------------------------------------------------------------------------
+# Patch 3 ablation: branch-replay reweighting strength gamma (no env access)
+# ---------------------------------------------------------------------------
+
+
+def run_patch3_ablation():
+    """Sweep gamma in patch 3 (branch-aware replay). gamma=0 reproduces patch 2
+    (full-distribution advantage) exactly. Larger gamma upweights rare
+    error-branch / recovery records (alpha = 1 + gamma*KL(pi_T||pi_ref)). The
+    thesis: greedy stays at 1.000 while sampled rises from ~0.864 toward ~0.99 --
+    closing the mass gap with zero extra env access. Records greedy + sampled."""
+    rows = []
+    grid = [0.0, 1.0, 5.0, 20.0, 100.0]
+    for seed in range(N_SEEDS):
+        teacher = Teacher(temperature=TEACHER_TEMP)
+        ref = _train_reference(teacher, seed)
+        ref_data = collect_dataset(ref, AgenticTroubleshootMDP(
+            tool_noise=MAIN_COLLECT_NOISE, rng=np.random.default_rng(seed)),
+            np.random.default_rng(seed), OPD_EPISODES, explore_eps=MAIN_COLLECT_NOISE)
+        support = {rec["state"].key() for rec in ref_data}
+        for gamma in grid:
+            rng = np.random.default_rng(seed)
+            coll = AgenticTroubleshootMDP(tool_noise=MAIN_COLLECT_NOISE, rng=rng)
+            e0 = coll.n_env_steps
+            pol, _ = train_offline_opd_branch_replay(
+                ref, teacher, coll, rng, n_episodes=OPD_EPISODES,
+                iters=OPD_ITERS, gamma=gamma)
+            env_steps = coll.n_env_steps - e0
+            g = _eval(pol, MAIN_DEPLOY_NOISE, seed, support)
+            s = _eval(pol, MAIN_DEPLOY_NOISE, seed, mode="sample")
+            rows.append(_row(f"branch_replay_g{gamma}", seed, MAIN_COLLECT_NOISE,
+                             MAIN_DEPLOY_NOISE, g, sampled_success=s["success_rate"],
+                             env_steps=env_steps))
+        print(f"[patch3] seed {seed} done")
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +452,12 @@ def main():
     print("Running representation ablation (linear vs tabular) ...")
     run_representation().to_csv(
         os.path.join(RESULTS_DIR, "results_representation.csv"), index=False)
+    print("Running patch-1 active-query ablation ...")
+    run_active_query().to_csv(os.path.join(RESULTS_DIR, "results_active.csv"),
+                              index=False)
+    print("Running patch-3 branch-replay ablation ...")
+    run_patch3_ablation().to_csv(os.path.join(RESULTS_DIR, "results_patch3.csv"),
+                                 index=False)
     print("Capturing case studies ...")
     with open(os.path.join(RESULTS_DIR, "case_studies.txt"), "w",
               encoding="utf-8") as fh:

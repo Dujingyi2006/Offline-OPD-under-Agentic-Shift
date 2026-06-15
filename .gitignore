@@ -1,2 +1,14 @@
+# Python build artifacts
 __pycache__/
 *.pyc
+
+# Local editor / agent settings
+.claude/
+
+# Source & reference inputs (kept on disk, excluded from the public repo)
+t2.pdf
+t2.txt
+任 (1).pdf
+任*.pdf
+对比论文.pdf
+对比论文.txt
